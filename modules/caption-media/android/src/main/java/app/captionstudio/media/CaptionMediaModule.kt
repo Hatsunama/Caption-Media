@@ -114,6 +114,9 @@ class CaptionMediaModule : Module() {
       var sampleRate = sourceFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
       var channelCount = sourceFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
       var pcmBytes = 0L
+      var writtenFrames = 0L
+      var insertedSilenceFrames = 0L
+      var trimmedOverlapFrames = 0L
 
       while (!outputDone) {
         if (!inputDone) {
@@ -147,8 +150,15 @@ class CaptionMediaModule : Module() {
         when (val outputIndex = codec.dequeueOutputBuffer(bufferInfo, CODEC_TIMEOUT_US)) {
           MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
             val decodedFormat = codec.outputFormat
-            sampleRate = decodedFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-            channelCount = decodedFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            val decodedSampleRate = decodedFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            val decodedChannelCount = decodedFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            if (pcmBytes > 0L &&
+              (decodedSampleRate != sampleRate || decodedChannelCount != channelCount)
+            ) {
+              throw IllegalStateException("Decoder changed PCM format after audio output started")
+            }
+            sampleRate = decodedSampleRate
+            channelCount = decodedChannelCount
             val encoding = if (decodedFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
               decodedFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
             } else {
@@ -163,7 +173,10 @@ class CaptionMediaModule : Module() {
           MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
 
           else -> if (outputIndex >= 0) {
-            if (bufferInfo.size > 0) {
+            val isDecodedAudio = bufferInfo.size > 0 &&
+              bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0 &&
+              bufferInfo.flags and MediaCodec.BUFFER_FLAG_DECODE_ONLY == 0
+            if (isDecodedAudio) {
               val decoded = codec.getOutputBuffer(outputIndex)
                 ?: throw IllegalStateException("Decoder output buffer is unavailable")
               decoded.order(ByteOrder.LITTLE_ENDIAN)
@@ -171,8 +184,36 @@ class CaptionMediaModule : Module() {
               decoded.limit(bufferInfo.offset + bufferInfo.size)
               val bytes = ByteArray(bufferInfo.size)
               decoded.get(bytes)
-              output.write(bytes)
-              pcmBytes += bytes.size
+
+              val bytesPerFrame = channelCount * PCM_BYTES_PER_SAMPLE
+              val bufferFrameCount = bytes.size / bytesPerFrame
+              val targetFrame = presentationTimeToFrame(
+                bufferInfo.presentationTimeUs,
+                sampleRate
+              )
+              val frameDelta = targetFrame - writtenFrames
+
+              if (frameDelta > 0L) {
+                writeSilence(output, frameDelta * bytesPerFrame)
+                writtenFrames += frameDelta
+                insertedSilenceFrames += frameDelta
+                pcmBytes += frameDelta * bytesPerFrame
+              }
+
+              val framesToSkip = if (frameDelta < 0L) {
+                (-frameDelta).coerceAtMost(bufferFrameCount.toLong())
+              } else {
+                0L
+              }
+              val byteOffset = (framesToSkip * bytesPerFrame).toInt()
+              val writableBytes = (bufferFrameCount * bytesPerFrame) - byteOffset
+              if (writableBytes > 0) {
+                output.write(bytes, byteOffset, writableBytes)
+                val framesWritten = writableBytes / bytesPerFrame
+                writtenFrames += framesWritten
+                pcmBytes += writableBytes
+              }
+              trimmedOverlapFrames += framesToSkip
             }
             outputDone = bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
             codec.releaseOutputBuffer(outputIndex, false)
@@ -188,7 +229,9 @@ class CaptionMediaModule : Module() {
         "sampleRate" to sampleRate,
         "channelCount" to channelCount,
         "durationMs" to durationUs / 1000L,
-        "pcmBytes" to pcmBytes
+        "pcmBytes" to pcmBytes,
+        "insertedSilenceMs" to framesToMilliseconds(insertedSilenceFrames, sampleRate),
+        "trimmedOverlapMs" to framesToMilliseconds(trimmedOverlapFrames, sampleRate)
       )
     } finally {
       output?.close()
@@ -225,6 +268,24 @@ class CaptionMediaModule : Module() {
     writeLittleEndianInt(output, pcmBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
   }
 
+  private fun presentationTimeToFrame(presentationTimeUs: Long, sampleRate: Int): Long {
+    val timestampUs = presentationTimeUs.coerceAtLeast(0L)
+    return (timestampUs * sampleRate + MICROSECONDS_PER_SECOND / 2L) / MICROSECONDS_PER_SECOND
+  }
+
+  private fun framesToMilliseconds(frames: Long, sampleRate: Int): Long =
+    if (sampleRate > 0) frames * 1000L / sampleRate else 0L
+
+  private fun writeSilence(output: RandomAccessFile, byteCount: Long) {
+    val silence = ByteArray(SILENCE_BUFFER_BYTES)
+    var remaining = byteCount
+    while (remaining > 0L) {
+      val chunkSize = remaining.coerceAtMost(silence.size.toLong()).toInt()
+      output.write(silence, 0, chunkSize)
+      remaining -= chunkSize
+    }
+  }
+
   private fun writeLittleEndianInt(output: RandomAccessFile, value: Int) {
     output.write(value and 0xff)
     output.write(value shr 8 and 0xff)
@@ -240,5 +301,8 @@ class CaptionMediaModule : Module() {
   companion object {
     private const val CODEC_TIMEOUT_US = 10_000L
     private const val WAV_HEADER_SIZE = 44
+    private const val PCM_BYTES_PER_SAMPLE = 2
+    private const val MICROSECONDS_PER_SECOND = 1_000_000L
+    private const val SILENCE_BUFFER_BYTES = 16 * 1024
   }
 }

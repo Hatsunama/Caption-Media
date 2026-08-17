@@ -76,7 +76,33 @@ export async function transcribeVideoLocally(options: {
     progress: 0,
     detail: 'Extracting audio on this phone',
   });
-  await CaptionMedia.extractAudioToWav(videoUri, audioFile.uri);
+
+  let audioPreparationFinished = false;
+  const preparationCueTimers = [
+    setTimeout(() => {
+      if (audioPreparationFinished) return;
+      onProgress?.({
+        stage: 'preparing-audio',
+        progress: 0.05,
+        detail: 'Extracting audio on this phone',
+      });
+    }, 3_000),
+    setTimeout(() => {
+      if (audioPreparationFinished) return;
+      onProgress?.({
+        stage: 'preparing-audio',
+        progress: 0.1,
+        detail: 'Still preparing audio — longer videos can take a minute',
+      });
+    }, 6_000),
+  ];
+
+  try {
+    await CaptionMedia.extractAudioToWav(videoUri, audioFile.uri);
+  } finally {
+    audioPreparationFinished = true;
+    preparationCueTimers.forEach(clearTimeout);
+  }
   onProgress?.({
     stage: 'preparing-audio',
     progress: 1,

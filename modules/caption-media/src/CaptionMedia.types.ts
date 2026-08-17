@@ -12,4 +12,6 @@ export type AudioExtractionResult = {
   channelCount: number;
   durationMs: number;
   pcmBytes: number;
+  insertedSilenceMs: number;
+  trimmedOverlapMs: number;
 };

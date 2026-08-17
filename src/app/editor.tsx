@@ -233,6 +233,22 @@ export default function EditorScreen() {
     }
   };
 
+  const confirmRegenerateCaptions = () => {
+    Alert.alert(
+      'Generate captions again?',
+      'This replaces the current caption text and timing. Your caption style and extra text or image layers stay unchanged.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Generate again',
+          onPress: () => {
+            void generateCaptions();
+          },
+        },
+      ],
+    );
+  };
+
   const chooseStyleScope = async (scope: StyleScope) => {
     if (!pendingChange) return;
     const next = applyStylePatch(
@@ -726,9 +742,20 @@ export default function EditorScreen() {
               <Text style={{ color: '#10130A', fontWeight: '800' }}>Generate captions</Text>
             </Pressable>
           ) : (
-            <Text style={{ color: palette.accent, fontSize: 12, fontWeight: '700' }}>
-              {project.captions.length} CAPTIONS
-            </Text>
+            <View style={{ alignItems: 'flex-end', gap: 4 }}>
+              <Text style={{ color: palette.accent, fontSize: 12, fontWeight: '700' }}>
+                {project.captions.length} CAPTIONS
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Generate captions again"
+                onPress={confirmRegenerateCaptions}
+                hitSlop={10}>
+                <Text style={{ color: palette.text, fontSize: 12, fontWeight: '700', textDecorationLine: 'underline' }}>
+                  Generate again
+                </Text>
+              </Pressable>
+            </View>
           )}
         </View>
 

@@ -14,7 +14,7 @@ Caption Studio is an Android-only, local-first automatic subtitle editor. Import
 
 Android may show a Play Protect warning because this independent APK is not installed through Google Play. Check that the address is this repository before continuing. Never download the APK from a mirror or reposting site.
 
-The current beta APK supports 64-bit ARM Android phones (the standard architecture for modern devices) and Android 7 or newer. A universal Play Store build is planned after device testing.
+The current beta APK is universal: it supports 64-bit ARM, 32-bit ARM, x86, and x86_64 Android devices running Android 7 or newer.
 
 ### From Termux on the phone
 
@@ -52,6 +52,9 @@ The first time `adb devices` runs, unlock the phone. Tap **Allow** on **Allow US
 - Android video import with source-orientation-aware preview
 - On-device Whisper transcription through `whisper.rn`
 - Native Android audio decoding to PCM WAV without a cloud API
+- Presentation-timestamp-aware audio extraction so silence and timing gaps stay aligned with the video
+- Responsive preparation feedback at 5% and 10% while long videos are being decoded
+- Safe **Generate again** control for replacing caption text/timing while preserving the project style and added layers
 - Downloadable Fast, Balanced, and Accurate Whisper model tiers
 - Caption grouping from word timestamps
 - A layered, magnetic timeline with a fixed video track plus reorderable caption, added-text, and image/sticker tracks
