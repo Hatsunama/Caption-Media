@@ -54,17 +54,21 @@ The first time `adb devices` runs, unlock the phone. Tap **Allow** on **Allow US
 - Native Android audio decoding to PCM WAV without a cloud API
 - Downloadable Fast, Balanced, and Accurate Whisper model tiers
 - Caption grouping from word timestamps
+- A layered, magnetic timeline with a fixed video track plus reorderable caption, added-text, and image/sticker tracks
 - Selectable subtitle timeline blocks with draggable start/end timing grips and one-tap delete
 - TikTok-style caption manipulation: drag to move, pinch to resize text, twist to rotate, resize from four large edge bars, or use the corner resize/rotate control
 - Project default → caption override → word override style inheritance
 - An explicit **This subtitle / All subtitles** styling decision
-- One searchable font browser with favorites, recents, and unlimited `.ttf`/`.otf` imports
+- One searchable font browser with 32 deliberately varied OFL fonts, favorites, recents, two-color treatments, and unlimited `.ttf`/`.otf` imports
+- 21 data-driven caption animations, including three visibly different emoji-reaction modes
+- Added text and phone images with their own timing, layer order, movement, resizing, rotation, and deletion controls
 - Source, 9:16, 16:9, 1:1, and 4:5 canvases
 - Fit and Fill framing for making a wide clip fill a TikTok canvas
 - Direct video drag, pinch-to-resize, two-finger rotation, size buttons, 90-degree rotation, and a precise free-angle scrubber
+- Nondestructive video split, clip deletion, and edge trimming with magnetic ripple updates to timed captions and visual layers
 - Local SQLite project snapshots
 
-Styled MP4/SRT/ASS export, split/merge controls, more animation presets, and the secondary video-editing tools remain planned work. The source video is always edited nondestructively.
+Styled MP4/SRT/ASS export and production signing remain pre-release work. Video cuts are currently represented and previewed nondestructively in the project timeline; final rendered-video export is not yet available. The source video is never rewritten by editing operations.
 
 ## Architecture
 
@@ -113,4 +117,4 @@ The first transcription downloads the selected model once. Later transcription c
 
 ## License
 
-MIT. Third-party libraries and downloaded models retain their own licenses.
+MIT. Third-party libraries and downloaded models retain their own licenses. Bundled typefaces come from Google Fonts under the SIL Open Font License; the individual license files are preserved in [`assets/fonts/licenses`](assets/fonts/licenses).

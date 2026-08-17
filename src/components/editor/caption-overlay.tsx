@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   type GestureResponderEvent,
   PanResponder,
@@ -6,10 +6,12 @@ import {
   Pressable,
   Text,
   View,
+  type ViewStyle,
 } from 'react-native';
 
+import { reactionEmojis } from '@/lib/animation-presets';
 import { resolveCaptionStyle } from '@/lib/style-resolver';
-import type { CaptionBlock, CaptionStyle, CaptionStylePatch, WordToken } from '@/types/project';
+import type { CaptionAnimationId, CaptionBlock, CaptionStyle, CaptionStylePatch, WordToken } from '@/types/project';
 
 type TouchPoint = { pageX: number; pageY: number };
 type CanvasMetrics = { width: number; height: number; pageX: number; pageY: number };
@@ -28,6 +30,7 @@ export function CaptionOverlay(props: {
   const { caption } = props;
   const canvasRef = useRef<View>(null);
   const canvas = useRef<CanvasMetrics>({ width: 1, height: 1, pageX: 0, pageY: 0 });
+  const [canvasLayout, setCanvasLayout] = useState({ width: 360, height: 640 });
   const style = caption ? resolveCaptionStyle(props.projectStyle, caption) : props.projectStyle;
   const styleRef = useRef(style);
   const propsRef = useRef(props);
@@ -84,16 +87,20 @@ export function CaptionOverlay(props: {
             const rotation =
               start.rotation +
               shortestAngleDelta(angle(start.touches[0], start.touches[1]), angle(touches[0], touches[1]));
+            const nextBox = {
+              width: clamp(start.box.width * scale, 0.16, 1.5),
+              height: clamp(start.box.height * scale, 0.06, 1.1),
+            };
 
             propsRef.current.onTransform?.({
-              position: {
-                x: clamp(start.position.x + (nextCenter.pageX - initialCenter.pageX) / size.width, 0.04, 0.96),
-                y: clamp(start.position.y + (nextCenter.pageY - initialCenter.pageY) / size.height, 0.04, 0.96),
-              },
-              box: {
-                width: clamp(start.box.width * scale, 0.16, 1.5),
-                height: clamp(start.box.height * scale, 0.06, 1.1),
-              },
+              position: clampPositionForBox(
+                {
+                  x: start.position.x + (nextCenter.pageX - initialCenter.pageX) / size.width,
+                  y: start.position.y + (nextCenter.pageY - initialCenter.pageY) / size.height,
+                },
+                nextBox,
+              ),
+              box: nextBox,
               fontSize: clamp(start.fontSize * scale, 10, 240),
               rotation: normalizeDegrees(rotation),
             });
@@ -102,10 +109,13 @@ export function CaptionOverlay(props: {
 
           const initial = start.touches[0];
           propsRef.current.onTransform?.({
-            position: {
-              x: clamp(start.position.x + (touches[0].pageX - initial.pageX) / size.width, 0.04, 0.96),
-              y: clamp(start.position.y + (touches[0].pageY - initial.pageY) / size.height, 0.04, 0.96),
-            },
+            position: clampPositionForBox(
+              {
+                x: start.position.x + (touches[0].pageX - initial.pageX) / size.width,
+                y: start.position.y + (touches[0].pageY - initial.pageY) / size.height,
+              },
+              start.box,
+            ),
           });
         },
         onPanResponderRelease: () => propsRef.current.onTransformEnd?.(),
@@ -116,10 +126,16 @@ export function CaptionOverlay(props: {
 
   if (!caption) return null;
 
-  const captionWords = caption.wordIds
+  const timedWords = caption.wordIds
     .map((id) => props.words.find((word) => word.id === id))
     .filter((word): word is WordToken => Boolean(word));
-  const renderedWords = captionWords.length > 0 ? captionWords : fallbackWords(caption);
+  const renderedWords = wordsMatchCaption(timedWords, caption.text) ? timedWords : fallbackWords(caption);
+  const activeIndex = renderedWords.findIndex((word) => props.currentMs >= word.startMs && props.currentMs < word.endMs);
+  const visibleWords = wordsForAnimation(renderedWords, activeIndex, style.animation.id);
+  const elapsed = Math.max(0, props.currentMs - caption.startMs);
+  const entryProgress = clamp(elapsed / Math.max(1, style.animation.durationMs), 0, 1);
+  const loopProgress = (elapsed % Math.max(1, style.animation.durationMs)) / Math.max(1, style.animation.durationMs);
+  const fittedFontSize = fitCaptionFont(style, renderedWords, canvasLayout);
   const backgroundAlpha = Math.round(style.background.opacity * 255).toString(16).padStart(2, '0');
   const transformed = (text: string) => {
     if (style.textTransform === 'uppercase') return text.toUpperCase();
@@ -135,13 +151,13 @@ export function CaptionOverlay(props: {
       onLayout={({ nativeEvent }) => {
         const { width, height } = nativeEvent.layout;
         canvas.current = { ...canvas.current, width: Math.max(1, width), height: Math.max(1, height) };
+        setCanvasLayout({ width: Math.max(1, width), height: Math.max(1, height) });
         canvasRef.current?.measureInWindow((pageX, pageY) => {
           canvas.current = { ...canvas.current, pageX, pageY };
         });
       }}
       style={{ position: 'absolute', inset: 0 }}>
       <View
-        {...panResponder.panHandlers}
         style={{
           position: 'absolute',
           left: `${(style.position.x - style.box.width / 2) * 100}%`,
@@ -157,44 +173,64 @@ export function CaptionOverlay(props: {
           borderColor: '#DFFF35',
           borderRadius: props.interactive ? 5 : 0,
         }}>
-        <Text
-          numberOfLines={style.maxLines}
-          adjustsFontSizeToFit={false}
-          style={{
-            width: '100%',
-            paddingHorizontal: style.background.paddingX,
-            paddingVertical: style.background.paddingY,
-            borderRadius: style.background.radius,
-            overflow: 'hidden',
-            backgroundColor: `${style.background.color}${backgroundAlpha}`,
-            color: style.textColor,
-            fontFamily: style.font.family,
-            fontSize: style.fontSize,
-            fontWeight: style.fontWeight,
-            fontStyle: style.italic ? 'italic' : 'normal',
-            lineHeight: style.fontSize * style.lineHeight,
-            letterSpacing: style.letterSpacing,
-            textAlign: style.alignment,
-            textShadowColor: style.shadow.color,
-            textShadowOffset: { width: style.shadow.offsetX, height: style.shadow.offsetY },
-            textShadowRadius: Math.max(style.shadow.blur, style.stroke.width),
-          }}>
-          {renderedWords.map((word, index) => {
-            const isActive = props.currentMs >= word.startMs && props.currentMs < word.endMs;
-            const wordStyle = resolveCaptionStyle(props.projectStyle, caption, word);
-            return (
-              <Text
-                key={word.id}
-                style={{
-                  color: isActive ? wordStyle.activeWordColor : wordStyle.textColor,
-                  fontSize: isActive && style.animation.id === 'punch' ? wordStyle.fontSize * 1.15 : wordStyle.fontSize,
-                }}>
-                {index > 0 ? ' ' : ''}
-                {transformed(word.text)}
-              </Text>
-            );
-          })}
-        </Text>
+        {props.interactive ? (
+          <View
+            {...panResponder.panHandlers}
+            collapsable={false}
+            style={{ position: 'absolute', inset: 0, zIndex: 1 }}
+          />
+        ) : null}
+        <View
+          pointerEvents="none"
+          style={[
+            {
+              width: '100%',
+              height: '100%',
+              justifyContent: 'center',
+              borderRadius: style.background.radius,
+              paddingHorizontal: style.background.paddingX,
+              paddingVertical: style.background.paddingY,
+              backgroundColor: `${style.background.color}${backgroundAlpha}`,
+            },
+            captionAnimationStyle(style.animation.id, entryProgress, loopProgress, style.animation.intensity),
+          ]}>
+          {style.textTreatment !== 'solid' ? (
+            <WordLayer
+              absolute
+              colorOverride={style.secondaryTextColor}
+              offset={treatmentOffset(style.textTreatment)}
+              words={visibleWords}
+              allWords={renderedWords}
+              activeIndex={activeIndex}
+              caption={caption}
+              projectStyle={props.projectStyle}
+              currentMs={props.currentMs}
+              animationId={style.animation.id}
+              loopProgress={loopProgress}
+              fittedFontSize={fittedFontSize}
+              transformed={transformed}
+            />
+          ) : null}
+          <WordLayer
+            words={visibleWords}
+            allWords={renderedWords}
+            activeIndex={activeIndex}
+            caption={caption}
+            projectStyle={props.projectStyle}
+            currentMs={props.currentMs}
+            animationId={style.animation.id}
+            loopProgress={loopProgress}
+            fittedFontSize={fittedFontSize}
+            transformed={transformed}
+          />
+          {style.animation.id.startsWith('emoji-') ? (
+            <EmojiEffects
+              mode={style.animation.id}
+              emojis={reactionEmojis(renderedWords[activeIndex]?.text ?? caption.text)}
+              progress={loopProgress}
+            />
+          ) : null}
+        </View>
 
         {props.interactive ? (
           <>
@@ -212,6 +248,7 @@ export function CaptionOverlay(props: {
                 position: 'absolute',
                 left: -20,
                 top: -20,
+                zIndex: 30,
                 width: 40,
                 height: 40,
                 alignItems: 'center',
@@ -241,6 +278,174 @@ export function CaptionOverlay(props: {
           </>
         ) : null}
       </View>
+    </View>
+  );
+}
+
+function WordLayer(props: {
+  words: WordToken[];
+  allWords: WordToken[];
+  activeIndex: number;
+  caption: CaptionBlock;
+  projectStyle: CaptionStyle;
+  currentMs: number;
+  animationId: CaptionAnimationId;
+  loopProgress: number;
+  fittedFontSize: number;
+  transformed: (text: string) => string;
+  absolute?: boolean;
+  colorOverride?: string;
+  offset?: { x: number; y: number };
+}) {
+  const style = resolveCaptionStyle(props.projectStyle, props.caption);
+  const justifyContent = style.alignment === 'left' ? 'flex-start' : style.alignment === 'right' ? 'flex-end' : 'center';
+  return (
+    <View
+      style={{
+        ...(props.absolute ? { position: 'absolute', inset: 0 } : null),
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        alignContent: 'center',
+        justifyContent,
+        transform: props.offset ? [{ translateX: props.offset.x }, { translateY: props.offset.y }] : undefined,
+      }}>
+      {props.words.map((word) => {
+        const originalIndex = props.allWords.findIndex((candidate) => candidate.id === word.id);
+        const isActive = originalIndex === props.activeIndex;
+        const isKaraokeActive = props.animationId === 'karaoke' && props.activeIndex >= 0 && originalIndex <= props.activeIndex;
+        const wordStyle = resolveCaptionStyle(props.projectStyle, props.caption, word);
+        return (
+          <View key={`${props.absolute ? 'back' : 'front'}-${word.id}`} style={wordAnimationStyle(props.animationId, isActive, originalIndex, props.loopProgress, style.animation.intensity)}>
+            <Text
+              allowFontScaling={false}
+              style={{
+                marginHorizontal: Math.max(1.5, props.fittedFontSize * 0.08),
+                color: props.colorOverride ?? (isActive || isKaraokeActive ? wordStyle.activeWordColor : wordStyle.textColor),
+                fontFamily: wordStyle.font.family,
+                fontSize: props.fittedFontSize,
+                fontWeight: wordStyle.font.family.startsWith('Caption-') ? '400' : wordStyle.fontWeight,
+                fontStyle: wordStyle.italic ? 'italic' : 'normal',
+                lineHeight: props.fittedFontSize * Math.max(1, wordStyle.lineHeight),
+                letterSpacing: wordStyle.letterSpacing,
+                textAlign: wordStyle.alignment,
+                textShadowColor: props.animationId === 'glow-pulse' && !props.colorOverride ? wordStyle.activeWordColor : wordStyle.shadow.color,
+                textShadowOffset: { width: wordStyle.shadow.offsetX, height: wordStyle.shadow.offsetY },
+                textShadowRadius:
+                  props.animationId === 'glow-pulse'
+                    ? 7 + 8 * Math.abs(Math.sin(props.loopProgress * Math.PI * 2))
+                    : Math.max(wordStyle.shadow.blur, wordStyle.stroke.width),
+              }}>
+              {props.transformed(word.text)}
+            </Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function wordsForAnimation(words: WordToken[], activeIndex: number, animationId: CaptionAnimationId) {
+  if (animationId === 'single-word') return [words[Math.max(0, activeIndex)]].filter(Boolean);
+  if (animationId === 'typewriter') return words.slice(0, Math.max(1, activeIndex + 1));
+  return words;
+}
+
+function wordsMatchCaption(words: WordToken[], captionText: string) {
+  if (words.length === 0) return false;
+  const normalize = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  return normalize(words.map((word) => word.text).join(' ')) === normalize(captionText);
+}
+
+function fitCaptionFont(style: CaptionStyle, words: WordToken[], canvas: { width: number; height: number }) {
+  const availableWidth = Math.max(24, style.box.width * canvas.width - style.background.paddingX * 2);
+  const availableHeight = Math.max(18, style.box.height * canvas.height - style.background.paddingY * 2);
+  const maxLines = Math.max(1, style.maxLines);
+  const text = words.map((word) => word.text).join(' ');
+  const longestWord = Math.max(1, ...words.map((word) => word.text.length));
+  const targetCharactersPerLine = Math.max(longestWord, Math.ceil(text.length / maxLines));
+  const widthCap = availableWidth / Math.max(1, targetCharactersPerLine * 0.57);
+  const longestWordCap = availableWidth / Math.max(1, longestWord * 0.64);
+  const heightCap = availableHeight / Math.max(1, maxLines * Math.max(1, style.lineHeight));
+  return clamp(Math.min(style.fontSize, widthCap, longestWordCap, heightCap), 9, style.fontSize);
+}
+
+function captionAnimationStyle(
+  id: CaptionAnimationId,
+  entry: number,
+  loop: number,
+  intensity: number,
+): ViewStyle {
+  const eased = 1 - Math.pow(1 - entry, 3);
+  switch (id) {
+    case 'slide-up':
+      return { opacity: entry, transform: [{ translateY: (1 - eased) * (35 + intensity * 80) }] };
+    case 'slide-left':
+      return { opacity: entry, transform: [{ translateX: (1 - eased) * -(55 + intensity * 120) }] };
+    case 'zoom-in':
+      return { opacity: entry, transform: [{ scale: 0.15 + eased * 0.85 }] };
+    case 'spin-in':
+      return { opacity: entry, transform: [{ rotate: `${(1 - eased) * -270}deg` }, { scale: 0.5 + eased * 0.5 }] };
+    case 'shake':
+      return { transform: [{ translateX: Math.sin(loop * Math.PI * 12) * (4 + intensity * 16) }, { rotate: `${Math.sin(loop * Math.PI * 9) * 2}deg` }] };
+    case 'glow-pulse':
+      return { transform: [{ scale: 1 + Math.sin(loop * Math.PI * 2) * (0.02 + intensity * 0.06) }] };
+    case 'elastic': {
+      const wobble = Math.sin(entry * Math.PI * 5) * (1 - entry);
+      return { opacity: Math.min(1, entry * 2.5), transform: [{ scaleX: 1 + wobble * (0.35 + intensity) }, { scaleY: 1 - wobble * 0.18 }] };
+    }
+    case 'flip':
+      return { opacity: entry, transform: [{ perspective: 900 }, { rotateY: `${(1 - eased) * 95}deg` }] };
+    case 'stomp':
+      return { opacity: entry, transform: [{ translateY: (1 - eased) * -(50 + intensity * 100) }, { scale: 1 + Math.sin(entry * Math.PI) * intensity * 0.35 }] };
+    default:
+      return {};
+  }
+}
+
+function wordAnimationStyle(
+  id: CaptionAnimationId,
+  active: boolean,
+  index: number,
+  loop: number,
+  intensity: number,
+): ViewStyle {
+  if (id === 'wave') return { transform: [{ translateY: Math.sin(loop * Math.PI * 2 + index * 0.85) * (4 + intensity * 18) }] };
+  if (!active) return {};
+  const pulse = Math.sin(loop * Math.PI);
+  if (id === 'pop') return { transform: [{ scale: 0.65 + pulse * (0.5 + intensity) }, { rotate: `${(1 - pulse) * -5}deg` }] };
+  if (id === 'bounce') return { transform: [{ translateY: -Math.abs(Math.sin(loop * Math.PI * 2)) * (8 + intensity * 32) }] };
+  if (id === 'punch') return { transform: [{ scale: 1 + pulse * (0.3 + intensity * 0.7) }, { rotate: `${Math.sin(loop * Math.PI * 2) * 3}deg` }] };
+  return {};
+}
+
+function treatmentOffset(treatment: CaptionStyle['textTreatment']) {
+  if (treatment === 'duotone-neon') return { x: -3, y: 1 };
+  if (treatment === 'duotone-shadow') return { x: 4, y: 5 };
+  return { x: 3, y: 2 };
+}
+
+function EmojiEffects(props: { mode: CaptionAnimationId; emojis: string[]; progress: number }) {
+  return (
+    <View pointerEvents="none" style={{ position: 'absolute', inset: -42 }}>
+      {props.emojis.map((emoji, index) => {
+        const phase = (props.progress + index * 0.17) % 1;
+        let style: ViewStyle;
+        if (props.mode === 'emoji-rain') {
+          style = { left: `${10 + index * 19}%`, top: `${phase * 105}%`, opacity: 0.95, transform: [{ rotate: `${phase * 240 - 80}deg` }, { scale: 0.8 + index * 0.08 }] };
+        } else if (props.mode === 'emoji-orbit') {
+          const angle = props.progress * Math.PI * 2 + (index * Math.PI * 2) / props.emojis.length;
+          style = { left: '50%', top: '50%', opacity: 0.95, transform: [{ translateX: Math.cos(angle) * 92 - 13 }, { translateY: Math.sin(angle) * 45 - 13 }, { rotate: `${angle * 57.3 + 90}deg` }] };
+        } else {
+          const angle = (index * Math.PI * 2) / props.emojis.length;
+          const radius = 24 + phase * 76;
+          style = { left: '50%', top: '50%', opacity: 1 - phase, transform: [{ translateX: Math.cos(angle) * radius - 13 }, { translateY: Math.sin(angle) * radius - 13 }, { scale: 0.7 + phase * 0.8 }] };
+        }
+        return (
+          <View key={`${emoji}-${index}`} style={[{ position: 'absolute' }, style]}>
+            <Text style={{ fontSize: 25 }}>{emoji}</Text>
+          </View>
+        );
+      })}
     </View>
   );
 }
@@ -290,10 +495,16 @@ function ResizeBar(props: {
           const nextDimension = clamp(original + (localDelta * current.side) / denominator, minimum, maximum);
           const appliedHandleDelta = ((nextDimension - original) * denominator) / current.side;
           const centerPixelDelta = appliedHandleDelta / 2;
-          const position = {
-            x: clamp(start.current.position.x + (centerPixelDelta * axisX) / size.width, 0.04, 0.96),
-            y: clamp(start.current.position.y + (centerPixelDelta * axisY) / size.height, 0.04, 0.96),
-          };
+          const nextBox = horizontal
+            ? { ...start.current.box, width: nextDimension }
+            : { ...start.current.box, height: nextDimension };
+          const position = clampPositionForBox(
+            {
+              x: start.current.position.x + (centerPixelDelta * axisX) / size.width,
+              y: start.current.position.y + (centerPixelDelta * axisY) / size.height,
+            },
+            nextBox,
+          );
 
           current.onChange?.(
             horizontal
@@ -311,8 +522,11 @@ function ResizeBar(props: {
   return (
     <View
       {...responder.panHandlers}
+      collapsable={false}
       style={{
         position: 'absolute',
+        zIndex: 20,
+        backgroundColor: 'rgba(0,0,0,0.001)',
         ...(vertical
           ? { width: 34, height: 78, top: '50%', marginTop: -39, [props.side < 0 ? 'left' : 'right']: -18 }
           : { width: 78, height: 34, left: '50%', marginLeft: -39, [props.side < 0 ? 'top' : 'bottom']: -18 }),
@@ -382,11 +596,13 @@ function RotateScaleHandle(props: {
           };
           const nextDistance = distance(center, point);
           const scale = nextDistance / start.current.distance;
+          const nextBox = {
+            width: clamp(start.current.box.width * scale, 0.16, 1.5),
+            height: clamp(start.current.box.height * scale, 0.06, 1.1),
+          };
           propsRef.current.onChange?.({
-            box: {
-              width: clamp(start.current.box.width * scale, 0.16, 1.5),
-              height: clamp(start.current.box.height * scale, 0.06, 1.1),
-            },
+            position: clampPositionForBox(style.position, nextBox),
+            box: nextBox,
             fontSize: clamp(start.current.fontSize * scale, 10, 240),
             rotation: normalizeDegrees(
               start.current.rotation + shortestAngleDelta(start.current.angle, angle(center, point)),
@@ -402,8 +618,10 @@ function RotateScaleHandle(props: {
   return (
     <View
       {...responder.panHandlers}
+      collapsable={false}
       style={{
         position: 'absolute',
+        zIndex: 25,
         right: -23,
         bottom: -23,
         width: 46,
@@ -447,6 +665,21 @@ function shortestAngleDelta(from: number, to: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function clampPositionForBox(
+  position: { x: number; y: number },
+  box: { width: number; height: number },
+) {
+  const clampAxis = (value: number, dimension: number) => {
+    const minimum = dimension / 2 + 0.025;
+    const maximum = 1 - dimension / 2 - 0.025;
+    return minimum >= maximum ? 0.5 : clamp(value, minimum, maximum);
+  };
+  return {
+    x: clampAxis(position.x, box.width),
+    y: clampAxis(position.y, box.height),
+  };
 }
 
 function normalizeDegrees(value: number) {

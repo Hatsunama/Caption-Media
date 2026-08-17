@@ -51,6 +51,17 @@ export function applyStylePatch(
       ...project,
       updatedAt,
       projectStyle: mergeStyle(project.projectStyle, patch),
+      captions: project.captions.map((caption) => ({
+        ...caption,
+        styleOverride: removePatchedKeys(caption.styleOverride, patch),
+      })),
+      transcription: {
+        ...project.transcription,
+        words: project.transcription.words.map((word) => ({
+          ...word,
+          styleOverride: removePatchedKeys(word.styleOverride, patch),
+        })),
+      },
     };
   }
 
@@ -66,6 +77,38 @@ export function applyStylePatch(
         : caption,
     ),
   };
+}
+
+/**
+ * "All captions" is authoritative for the fields the user just changed. Old
+ * caption/word overrides for those same fields are removed so every subtitle
+ * visibly receives the choice while unrelated custom styling is preserved.
+ */
+function removePatchedKeys(
+  override: CaptionStylePatch | undefined,
+  patch: CaptionStylePatch,
+): CaptionStylePatch | undefined {
+  if (!override) return undefined;
+  const next = { ...override } as Record<string, unknown>;
+  const patchRecord = patch as Record<string, unknown>;
+
+  for (const [key, patchValue] of Object.entries(patchRecord)) {
+    const overrideValue = next[key];
+    if (isRecord(patchValue) && isRecord(overrideValue)) {
+      const nested = { ...overrideValue };
+      for (const nestedKey of Object.keys(patchValue)) delete nested[nestedKey];
+      if (Object.keys(nested).length === 0) delete next[key];
+      else next[key] = nested;
+    } else {
+      delete next[key];
+    }
+  }
+
+  return Object.keys(next).length > 0 ? (next as CaptionStylePatch) : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 export function mergePatch(

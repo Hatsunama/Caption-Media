@@ -2,54 +2,43 @@ import { useMemo, useState } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
 import { Directory, File, Paths } from 'expo-file-system';
 import * as Font from 'expo-font';
-import {
-  FlatList,
-  Modal,
-  Pressable,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { FlatList, Modal, Pressable, Text, TextInput, View } from 'react-native';
 
-import type { FontReference } from '@/types/project';
+import { BUILT_IN_FONT_CHOICES, type FontChoice } from '@/lib/font-catalog';
 
-const BUILT_IN_FONTS: FontReference[] = [
-  { id: 'system-sans', family: 'sans-serif', source: 'built-in' },
-  { id: 'system-condensed', family: 'sans-serif-condensed', source: 'built-in' },
-  { id: 'system-serif', family: 'serif', source: 'built-in' },
-  { id: 'system-mono', family: 'monospace', source: 'built-in' },
-];
-
-const LABELS: Record<string, string> = {
-  'system-sans': 'System Sans',
-  'system-condensed': 'Condensed Bold',
-  'system-serif': 'Editorial Serif',
-  'system-mono': 'Creator Mono',
-};
+type Filter = 'all' | 'favorites' | 'recent' | 'imported';
 
 export function FontBrowser(props: {
   visible: boolean;
   previewText: string;
   onClose: () => void;
-  onSelect: (font: FontReference) => void;
+  onSelect: (choice: FontChoice) => void;
 }) {
   const [search, setSearch] = useState('');
-  const [imported, setImported] = useState<FontReference[]>([]);
-  const [favorites, setFavorites] = useState<string[]>(['system-condensed']);
-  const fonts = useMemo(
-    () => [...imported, ...BUILT_IN_FONTS].filter((font) => displayName(font).toLowerCase().includes(search.toLowerCase())),
-    [imported, search],
-  );
+  const [filter, setFilter] = useState<Filter>('all');
+  const [imported, setImported] = useState<FontChoice[]>([]);
+  const [favorites, setFavorites] = useState<string[]>(['bungee', 'monoton', 'rubik-glitch']);
+  const [recent, setRecent] = useState<string[]>([]);
+  const allFonts = useMemo(() => [...imported, ...BUILT_IN_FONT_CHOICES], [imported]);
+  const fonts = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return allFonts.filter((choice) => {
+      if (query && !`${choice.name} ${choice.mood}`.toLowerCase().includes(query)) return false;
+      if (filter === 'favorites') return favorites.includes(choice.font.id);
+      if (filter === 'recent') return recent.includes(choice.font.id);
+      if (filter === 'imported') return choice.font.source === 'imported';
+      return true;
+    });
+  }, [allFonts, favorites, filter, recent, search]);
+
+  const selectFont = (choice: FontChoice) => {
+    setRecent((current) => [choice.font.id, ...current.filter((id) => id !== choice.font.id)].slice(0, 8));
+    props.onSelect(choice);
+  };
 
   const importFont = async () => {
     const result = await DocumentPicker.getDocumentAsync({
-      type: [
-        'font/ttf',
-        'font/otf',
-        'application/x-font-ttf',
-        'application/x-font-opentype',
-        'application/vnd.ms-opentype',
-      ],
+      type: ['font/ttf', 'font/otf', 'application/x-font-ttf', 'application/x-font-opentype', 'application/vnd.ms-opentype'],
       copyToCacheDirectory: true,
       multiple: false,
     });
@@ -63,14 +52,15 @@ export function FontBrowser(props: {
     const destination = new File(directory, `${family}${extension}`);
     await new File(asset.uri).copy(destination, { overwrite: true });
     await Font.loadAsync({ [family]: destination.uri });
-    const font: FontReference = {
-      id: family,
-      family,
-      source: 'imported',
-      uri: destination.uri,
-      postScriptName: asset.name.replace(/\.(ttf|otf)$/i, ''),
+    const name = asset.name.replace(/\.(ttf|otf)$/i, '');
+    const choice: FontChoice = {
+      font: { id: family, family, source: 'imported', uri: destination.uri, postScriptName: name },
+      name,
+      mood: 'Your imported font',
+      treatment: 'solid',
     };
-    setImported((current) => [font, ...current]);
+    setImported((current) => [choice, ...current]);
+    setFilter('imported');
   };
 
   return (
@@ -78,9 +68,9 @@ export function FontBrowser(props: {
       <View style={{ flex: 1, backgroundColor: '#0D1014', paddingTop: 20 }}>
         <View style={{ paddingHorizontal: 20, gap: 12 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            <View>
-              <Text style={{ color: '#F7F8FA', fontSize: 26, fontWeight: '800' }}>Fonts</Text>
-              <Text style={{ color: '#919BA8', fontSize: 13 }}>Built-in and imported fonts, all in one place.</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: '#F7F8FA', fontSize: 26, fontWeight: '800' }}>All Fonts</Text>
+              <Text style={{ color: '#919BA8', fontSize: 13 }}>32 varied free fonts, favorites, recent, and imports.</Text>
             </View>
             <Pressable onPress={props.onClose} hitSlop={12}>
               <Text style={{ color: '#DFFF35', fontSize: 16, fontWeight: '700' }}>Done</Text>
@@ -89,34 +79,20 @@ export function FontBrowser(props: {
           <TextInput
             value={search}
             onChangeText={setSearch}
-            placeholder="Search fonts"
+            placeholder="Search name or mood"
             placeholderTextColor="#707A87"
-            style={{
-              height: 48,
-              borderRadius: 14,
-              paddingHorizontal: 15,
-              color: '#F7F8FA',
-              backgroundColor: '#1A1F26',
-            }}
+            style={{ height: 48, borderRadius: 14, paddingHorizontal: 15, color: '#F7F8FA', backgroundColor: '#1A1F26' }}
           />
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            {['★ Favorites', 'Recently used', 'My fonts', 'Built-in'].map((label) => (
-              <View key={label} style={{ paddingHorizontal: 11, paddingVertical: 8, borderRadius: 999, backgroundColor: '#20262E' }}>
-                <Text style={{ color: '#D4DAE1', fontSize: 12 }}>{label}</Text>
-              </View>
-            ))}
+          <View style={{ flexDirection: 'row', gap: 7 }}>
+            <FilterChip label="All" active={filter === 'all'} onPress={() => setFilter('all')} />
+            <FilterChip label="★ Favorites" active={filter === 'favorites'} onPress={() => setFilter('favorites')} />
+            <FilterChip label="Recent" active={filter === 'recent'} onPress={() => setFilter('recent')} />
+            <FilterChip label="My Fonts" active={filter === 'imported'} onPress={() => setFilter('imported')} />
           </View>
           <Pressable
             onPress={importFont}
-            style={{
-              padding: 14,
-              borderRadius: 15,
-              flexDirection: 'row',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              backgroundColor: '#DFFF35',
-            }}>
-            <Text style={{ color: '#11140C', fontWeight: '800' }}>Import .ttf or .otf</Text>
+            style={{ padding: 14, borderRadius: 15, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#DFFF35' }}>
+            <Text style={{ color: '#11140C', fontWeight: '800' }}>Import unlimited .ttf or .otf fonts</Text>
             <Text style={{ color: '#11140C', fontSize: 22 }}>＋</Text>
           </Pressable>
         </View>
@@ -124,35 +100,33 @@ export function FontBrowser(props: {
         <FlatList
           contentInsetAdjustmentBehavior="automatic"
           data={fonts}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item) => item.font.id}
           contentContainerStyle={{ padding: 20, gap: 10, paddingBottom: 48 }}
+          ListEmptyComponent={<Text style={{ color: '#919BA8', textAlign: 'center', padding: 30 }}>No fonts match this view.</Text>}
           renderItem={({ item }) => (
             <Pressable
-              onPress={() => props.onSelect(item)}
-              style={{
-                minHeight: 84,
-                justifyContent: 'center',
-                gap: 6,
-                paddingHorizontal: 16,
-                borderRadius: 17,
-                backgroundColor: '#191E25',
-              }}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                <Text style={{ color: '#99A3B0', fontSize: 12 }}>{displayName(item)}</Text>
+              onPress={() => selectFont(item)}
+              style={{ minHeight: 94, justifyContent: 'center', gap: 7, paddingHorizontal: 16, borderRadius: 17, backgroundColor: '#191E25' }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <View style={{ flex: 1, flexDirection: 'row', gap: 7, alignItems: 'center' }}>
+                  <Text style={{ color: '#D5DBE2', fontSize: 12, fontWeight: '800' }}>{item.name}</Text>
+                  <Text numberOfLines={1} style={{ flexShrink: 1, color: '#707B88', fontSize: 10 }}>{item.mood}</Text>
+                  {item.treatment !== 'solid' ? (
+                    <View style={{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, backgroundColor: '#34264A' }}>
+                      <Text style={{ color: '#EBCBFF', fontSize: 8, fontWeight: '900' }}>2 COLOR</Text>
+                    </View>
+                  ) : null}
+                </View>
                 <Pressable
                   hitSlop={12}
                   onPress={(event) => {
                     event.stopPropagation();
-                    setFavorites((current) =>
-                      current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id],
-                    );
+                    setFavorites((current) => current.includes(item.font.id) ? current.filter((id) => id !== item.font.id) : [...current, item.font.id]);
                   }}>
-                  <Text style={{ color: favorites.includes(item.id) ? '#DFFF35' : '#66717E', fontSize: 20 }}>★</Text>
+                  <Text style={{ color: favorites.includes(item.font.id) ? '#DFFF35' : '#66717E', fontSize: 20 }}>★</Text>
                 </Pressable>
               </View>
-              <Text numberOfLines={1} style={{ color: '#F7F8FA', fontFamily: item.family, fontSize: 24 }}>
-                {props.previewText || 'Make every word count'}
-              </Text>
+              <FontPreview choice={item} text={props.previewText || 'Make every word count'} />
             </Pressable>
           )}
         />
@@ -161,6 +135,29 @@ export function FontBrowser(props: {
   );
 }
 
-function displayName(font: FontReference) {
-  return font.postScriptName || LABELS[font.id] || font.family;
+function FontPreview(props: { choice: FontChoice; text: string }) {
+  const primary = props.choice.colors?.primary ?? '#F7F8FA';
+  const secondary = props.choice.colors?.secondary;
+  return (
+    <View style={{ minHeight: 36, justifyContent: 'center' }}>
+      {secondary ? (
+        <Text
+          numberOfLines={1}
+          style={{ position: 'absolute', left: 2, top: 4, right: -2, color: secondary, fontFamily: props.choice.font.family, fontSize: 25, fontWeight: '400' }}>
+          {props.text}
+        </Text>
+      ) : null}
+      <Text numberOfLines={1} style={{ color: primary, fontFamily: props.choice.font.family, fontSize: 25, fontWeight: '400' }}>
+        {props.text}
+      </Text>
+    </View>
+  );
+}
+
+function FilterChip(props: { label: string; active: boolean; onPress: () => void }) {
+  return (
+    <Pressable onPress={props.onPress} style={{ flex: 1, alignItems: 'center', paddingVertical: 8, borderRadius: 999, backgroundColor: props.active ? '#354212' : '#20262E' }}>
+      <Text style={{ color: props.active ? '#DFFF35' : '#D4DAE1', fontSize: 10, fontWeight: props.active ? '800' : '500' }}>{props.label}</Text>
+    </Pressable>
+  );
 }

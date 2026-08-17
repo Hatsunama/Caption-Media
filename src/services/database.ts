@@ -58,14 +58,31 @@ export async function getProject(projectId: string): Promise<CaptionProject | nu
 }
 
 function hydrateProject(project: CaptionProject): CaptionProject {
+  const hydratedProjectStyle = {
+    ...DEFAULT_CAPTION_STYLE,
+    ...project.projectStyle,
+    position: { ...DEFAULT_CAPTION_STYLE.position, ...project.projectStyle?.position },
+    box: { ...DEFAULT_CAPTION_STYLE.box, ...project.projectStyle?.box },
+  };
   return {
     ...project,
-    projectStyle: {
-      ...DEFAULT_CAPTION_STYLE,
-      ...project.projectStyle,
-      position: { ...DEFAULT_CAPTION_STYLE.position, ...project.projectStyle?.position },
-      box: { ...DEFAULT_CAPTION_STYLE.box, ...project.projectStyle?.box },
-    },
+    projectStyle: hydratedProjectStyle,
+    layers: (project.layers ?? [{ id: 'captions', kind: 'captions', name: 'Captions', visible: true }]).map((layer) =>
+      layer.kind === 'text'
+        ? {
+            ...layer,
+            style: {
+              ...DEFAULT_CAPTION_STYLE,
+              ...layer.style,
+              position: { ...DEFAULT_CAPTION_STYLE.position, ...layer.style?.position },
+              box: { ...DEFAULT_CAPTION_STYLE.box, ...layer.style?.box },
+            },
+          }
+        : layer,
+    ),
+    clips: project.clips?.length
+      ? project.clips
+      : [{ id: 'source-clip', sourceStartMs: 0, sourceEndMs: project.source.durationMs }],
     canvas: project.canvas ?? {
       preset: 'source',
       aspectWidth: project.source.width ?? 9,

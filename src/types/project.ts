@@ -7,7 +7,23 @@ export type CaptionAnimationId =
   | 'single-word'
   | 'pop'
   | 'bounce'
-  | 'punch';
+  | 'punch'
+  | 'typewriter'
+  | 'slide-up'
+  | 'slide-left'
+  | 'zoom-in'
+  | 'spin-in'
+  | 'wave'
+  | 'shake'
+  | 'glow-pulse'
+  | 'elastic'
+  | 'flip'
+  | 'stomp'
+  | 'emoji-burst'
+  | 'emoji-orbit'
+  | 'emoji-rain';
+
+export type TextTreatment = 'solid' | 'duotone-offset' | 'duotone-shadow' | 'duotone-neon';
 
 export type FontReference = {
   id: Identifier;
@@ -32,6 +48,8 @@ export type CaptionStyle = {
   fontWeight: '400' | '500' | '600' | '700' | '800' | '900';
   italic: boolean;
   textColor: string;
+  secondaryTextColor: string;
+  textTreatment: TextTreatment;
   activeWordColor: string;
   stroke: {
     color: string;
@@ -102,6 +120,47 @@ export type CaptionBlock = {
   styleOverride?: CaptionStylePatch;
 };
 
+export type CaptionsVisualLayer = {
+  id: 'captions';
+  kind: 'captions';
+  name: string;
+  visible: boolean;
+};
+
+export type TextVisualLayer = {
+  id: Identifier;
+  kind: 'text';
+  name: string;
+  visible: boolean;
+  text: string;
+  startMs: number;
+  endMs: number;
+  style: CaptionStyle;
+};
+
+export type ImageVisualLayer = {
+  id: Identifier;
+  kind: 'image';
+  name: string;
+  visible: boolean;
+  uri: string;
+  startMs: number;
+  endMs: number;
+  position: { x: number; y: number };
+  box: { width: number; height: number };
+  rotation: number;
+  opacity: number;
+};
+
+/** Ordered top-to-bottom. The first visible layer is rendered above later rows. */
+export type VisualLayer = CaptionsVisualLayer | TextVisualLayer | ImageVisualLayer;
+
+export type VideoClip = {
+  id: Identifier;
+  sourceStartMs: number;
+  sourceEndMs: number;
+};
+
 export type VideoEdit =
   | { id: Identifier; type: 'trim'; startMs: number; endMs: number }
   | { id: Identifier; type: 'crop'; x: number; y: number; width: number; height: number }
@@ -131,6 +190,8 @@ export type CaptionProject = {
   };
   captions: CaptionBlock[];
   projectStyle: CaptionStyle;
+  layers: VisualLayer[];
+  clips: VideoClip[];
   canvas: {
     preset: 'source' | '9:16' | '16:9' | '1:1' | '4:5';
     aspectWidth: number;
@@ -161,6 +222,8 @@ export const DEFAULT_CAPTION_STYLE: CaptionStyle = {
   fontWeight: '800',
   italic: false,
   textColor: '#FFFFFF',
+  secondaryTextColor: '#FF4FD8',
+  textTreatment: 'solid',
   activeWordColor: '#DFFF35',
   stroke: {
     color: '#111111',

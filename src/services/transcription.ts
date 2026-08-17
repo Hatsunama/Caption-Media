@@ -131,7 +131,7 @@ export async function transcribeVideoLocally(options: {
 }
 
 function normalizeWordSegments(
-  segments: Array<{ text: string; t0: number; t1: number }>,
+  segments: { text: string; t0: number; t1: number }[],
 ): WordToken[] {
   const words: WordToken[] = [];
 

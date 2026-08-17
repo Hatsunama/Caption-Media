@@ -1,6 +1,13 @@
+import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router/stack';
 
+import { FONT_ASSETS } from '@/lib/font-catalog';
+
 export default function RootLayout() {
+  const [fontsLoaded] = useFonts(FONT_ASSETS);
+
+  if (!fontsLoaded) return null;
+
   return (
     <Stack
       screenOptions={{

@@ -3,7 +3,7 @@ import { type GestureResponderEvent, Modal, PanResponder, Pressable, ScrollView,
 
 import type { CaptionProject } from '@/types/project';
 
-const presets: Array<{ id: CaptionProject['canvas']['preset']; label: string }> = [
+const presets: { id: CaptionProject['canvas']['preset']; label: string }[] = [
   { id: 'source', label: 'Original' },
   { id: '9:16', label: '9:16 TikTok' },
   { id: '16:9', label: '16:9' },
