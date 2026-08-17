@@ -4,6 +4,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   Text,
@@ -11,6 +12,7 @@ import {
 } from 'react-native';
 
 import { listProjects } from '@/services/database';
+import { preserveImportedVideo } from '@/services/media-storage';
 import type { CaptionProject } from '@/types/project';
 
 const palette = {
@@ -52,15 +54,26 @@ export default function ProjectsScreen() {
       if (result.canceled) return;
 
       const asset = result.assets[0];
+      const projectId = `project-${Date.now()}`;
+      const permanentUri = await preserveImportedVideo({
+        projectId,
+        sourceUri: asset.uri,
+        fileName: asset.fileName,
+      });
       router.push({
         pathname: '/editor',
         params: {
-          uri: asset.uri,
+          uri: permanentUri,
           name: asset.fileName ?? 'Untitled video',
           durationMs: String(asset.duration ?? 0),
-          projectId: `project-${Date.now()}`,
+          projectId,
         },
       });
+    } catch (error) {
+      Alert.alert(
+        'Could not import video',
+        error instanceof Error ? error.message : 'The selected video could not be copied.',
+      );
     } finally {
       setImporting(false);
     }
