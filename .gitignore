@@ -36,7 +36,17 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
-example
+# generated build outputs and local media/model caches
+**/build/
+**/.cxx/
+*.apk
+*.aab
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.bin
+research-private/
 
 # generated native folders
 /ios

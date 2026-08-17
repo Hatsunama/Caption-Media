@@ -1,0 +1,202 @@
+export type Identifier = string;
+
+export type CaptionAnimationId =
+  | 'none'
+  | 'active-word'
+  | 'karaoke'
+  | 'single-word'
+  | 'pop'
+  | 'bounce'
+  | 'punch';
+
+export type FontReference = {
+  id: Identifier;
+  family: string;
+  source: 'built-in' | 'imported';
+  uri?: string;
+  postScriptName?: string;
+};
+
+export type NormalizedTransform = {
+  /** Center point measured from 0 to 1 inside the output canvas. */
+  position: { x: number; y: number };
+  /** Object bounds measured as a fraction of the output canvas. */
+  box: { width: number; height: number };
+  /** Free rotation in degrees. Values are not restricted to quarter turns. */
+  rotation: number;
+};
+
+export type CaptionStyle = {
+  font: FontReference;
+  fontSize: number;
+  fontWeight: '400' | '500' | '600' | '700' | '800' | '900';
+  italic: boolean;
+  textColor: string;
+  activeWordColor: string;
+  stroke: {
+    color: string;
+    width: number;
+  };
+  shadow: {
+    color: string;
+    opacity: number;
+    blur: number;
+    offsetX: number;
+    offsetY: number;
+  };
+  background: {
+    color: string;
+    opacity: number;
+    radius: number;
+    paddingX: number;
+    paddingY: number;
+  };
+  alignment: 'left' | 'center' | 'right';
+  letterSpacing: number;
+  lineHeight: number;
+  textTransform: 'none' | 'uppercase' | 'lowercase';
+  position: {
+    x: number;
+    y: number;
+  };
+  box: {
+    width: number;
+    height: number;
+  };
+  rotation: number;
+  maxLines: number;
+  animation: {
+    id: CaptionAnimationId;
+    intensity: number;
+    durationMs: number;
+  };
+};
+
+export type CaptionStylePatch = Partial<
+  Omit<CaptionStyle, 'font' | 'stroke' | 'shadow' | 'background' | 'position' | 'box' | 'animation'>
+> & {
+  font?: Partial<FontReference>;
+  stroke?: Partial<CaptionStyle['stroke']>;
+  shadow?: Partial<CaptionStyle['shadow']>;
+  background?: Partial<CaptionStyle['background']>;
+  position?: Partial<CaptionStyle['position']>;
+  box?: Partial<CaptionStyle['box']>;
+  animation?: Partial<CaptionStyle['animation']>;
+};
+
+export type WordToken = {
+  id: Identifier;
+  text: string;
+  startMs: number;
+  endMs: number;
+  confidence?: number;
+  styleOverride?: CaptionStylePatch;
+};
+
+export type CaptionBlock = {
+  id: Identifier;
+  text: string;
+  startMs: number;
+  endMs: number;
+  wordIds: Identifier[];
+  styleOverride?: CaptionStylePatch;
+};
+
+export type VideoEdit =
+  | { id: Identifier; type: 'trim'; startMs: number; endMs: number }
+  | { id: Identifier; type: 'crop'; x: number; y: number; width: number; height: number }
+  | { id: Identifier; type: 'rotate'; degrees: number }
+  | { id: Identifier; type: 'speed'; rate: number; startMs: number; endMs: number }
+  | { id: Identifier; type: 'volume'; gain: number; startMs: number; endMs: number };
+
+export type CaptionProject = {
+  schemaVersion: 1;
+  id: Identifier;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  source: {
+    uri: string;
+    displayName: string;
+    durationMs: number;
+    width?: number;
+    height?: number;
+    rotation?: number;
+  };
+  transcription: {
+    language: string;
+    modelId: string;
+    generatedAt?: string;
+    words: WordToken[];
+  };
+  captions: CaptionBlock[];
+  projectStyle: CaptionStyle;
+  canvas: {
+    preset: 'source' | '9:16' | '16:9' | '1:1' | '4:5';
+    aspectWidth: number;
+    aspectHeight: number;
+    backgroundColor: string;
+  };
+  videoTransform: {
+    fit: 'fit' | 'fill';
+    position: { x: number; y: number };
+    scale: number;
+    rotation: number;
+  };
+  videoEdits: VideoEdit[];
+  export: {
+    resolution: '720p' | '1080p' | 'original';
+    format: 'mp4';
+    burnCaptions: boolean;
+  };
+};
+
+export const DEFAULT_CAPTION_STYLE: CaptionStyle = {
+  font: {
+    id: 'inter-bold',
+    family: 'sans-serif',
+    source: 'built-in',
+  },
+  fontSize: 48,
+  fontWeight: '800',
+  italic: false,
+  textColor: '#FFFFFF',
+  activeWordColor: '#DFFF35',
+  stroke: {
+    color: '#111111',
+    width: 3,
+  },
+  shadow: {
+    color: '#000000',
+    opacity: 0.45,
+    blur: 4,
+    offsetX: 0,
+    offsetY: 3,
+  },
+  background: {
+    color: '#000000',
+    opacity: 0,
+    radius: 12,
+    paddingX: 14,
+    paddingY: 8,
+  },
+  alignment: 'center',
+  letterSpacing: 0,
+  lineHeight: 1.05,
+  textTransform: 'none',
+  position: {
+    x: 0.5,
+    y: 0.78,
+  },
+  box: {
+    width: 0.86,
+    height: 0.2,
+  },
+  rotation: 0,
+  maxLines: 2,
+  animation: {
+    id: 'active-word',
+    intensity: 0.12,
+    durationMs: 140,
+  },
+};

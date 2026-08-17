@@ -1,18 +1,16 @@
 {
   "expo": {
-    "name": "caption-studio",
+    "name": "Caption Studio",
     "slug": "caption-studio",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "captionstudio",
-    "userInterfaceStyle": "automatic",
-    "ios": {
-      "icon": "./assets/expo.icon"
-    },
+    "userInterfaceStyle": "dark",
     "android": {
+      "package": "app.captionstudio.mobile",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#090B0E",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
@@ -25,12 +23,17 @@
     },
     "plugins": [
       "expo-router",
+      "expo-document-picker",
+      "expo-image-picker",
+      "expo-media-library",
+      "expo-sqlite",
+      "expo-video",
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
+          "backgroundColor": "#090B0E",
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "imageWidth": 176
         }
       ]
     ],

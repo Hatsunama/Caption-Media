@@ -1,98 +1,201 @@
-import * as Device from 'expo-device';
-import { Platform, StyleSheet } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useCallback, useEffect, useState } from 'react';
+import { Image } from 'expo-image';
+import * as ImagePicker from 'expo-image-picker';
+import { useRouter } from 'expo-router';
+import {
+  ActivityIndicator,
+  FlatList,
+  Pressable,
+  Text,
+  View,
+} from 'react-native';
 
-import { AnimatedIcon } from '@/components/animated-icon';
-import { HintRow } from '@/components/hint-row';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { listProjects } from '@/services/database';
+import type { CaptionProject } from '@/types/project';
 
-function getDevMenuHint() {
-  if (Platform.OS === 'web') {
-    return <ThemedText type="small">use browser devtools</ThemedText>;
-  }
-  if (Device.isDevice) {
-    return (
-      <ThemedText type="small">
-        shake device or press <ThemedText type="code">m</ThemedText> in terminal
-      </ThemedText>
-    );
-  }
-  const shortcut = Platform.OS === 'android' ? 'cmd+m (or ctrl+m)' : 'cmd+d';
+const palette = {
+  background: '#090B0E',
+  surface: '#14181E',
+  surfaceRaised: '#1B2028',
+  text: '#F7F8FA',
+  muted: '#9DA7B5',
+  accent: '#DFFF35',
+  border: '#282F39',
+};
+
+export default function ProjectsScreen() {
+  const router = useRouter();
+  const [projects, setProjects] = useState<CaptionProject[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [importing, setImporting] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setProjects(await listProjects());
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const importVideo = async () => {
+    setImporting(true);
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['videos'],
+        allowsEditing: false,
+        quality: 1,
+      });
+      if (result.canceled) return;
+
+      const asset = result.assets[0];
+      router.push({
+        pathname: '/editor',
+        params: {
+          uri: asset.uri,
+          name: asset.fileName ?? 'Untitled video',
+          durationMs: String(asset.duration ?? 0),
+          projectId: `project-${Date.now()}`,
+        },
+      });
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
-    <ThemedText type="small">
-      press <ThemedText type="code">{shortcut}</ThemedText>
-    </ThemedText>
+    <FlatList
+      contentInsetAdjustmentBehavior="automatic"
+      style={{ flex: 1, backgroundColor: palette.background }}
+      contentContainerStyle={{ padding: 20, gap: 18, paddingBottom: 48 }}
+      data={projects}
+      keyExtractor={(item) => item.id}
+      ListHeaderComponent={
+        <View style={{ gap: 18 }}>
+          <View style={{ gap: 6 }}>
+            <Text selectable style={{ color: palette.text, fontSize: 30, fontWeight: '800' }}>
+              Captions first.
+            </Text>
+            <Text selectable style={{ color: palette.muted, fontSize: 16, lineHeight: 23 }}>
+              Import a video, generate captions locally, then style every word without credits,
+              quotas, or a watermark.
+            </Text>
+          </View>
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Import a video"
+            disabled={importing}
+            onPress={importVideo}
+            style={({ pressed }) => ({
+              minHeight: 142,
+              borderRadius: 24,
+              padding: 20,
+              justifyContent: 'space-between',
+              backgroundColor: pressed ? '#CDEB2B' : palette.accent,
+            })}>
+            <Text style={{ color: '#11140C', fontSize: 16, fontWeight: '700' }}>
+              NEW PROJECT
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+              <Text style={{ color: '#11140C', fontSize: 28, lineHeight: 32, fontWeight: '900' }}>
+                Import video{`\n`}→ Generate captions
+              </Text>
+              {importing ? <ActivityIndicator color="#11140C" /> : <Text style={{ fontSize: 36 }}>＋</Text>}
+            </View>
+          </Pressable>
+
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            {['Offline after model download', 'No watermark', 'Unlimited styles'].map((label) => (
+              <View
+                key={label}
+                style={{
+                  flex: 1,
+                  minHeight: 74,
+                  justifyContent: 'center',
+                  borderRadius: 16,
+                  padding: 12,
+                  backgroundColor: palette.surface,
+                  borderWidth: 1,
+                  borderColor: palette.border,
+                }}>
+                <Text style={{ color: palette.text, fontSize: 12, lineHeight: 16, fontWeight: '600' }}>
+                  {label}
+                </Text>
+              </View>
+            ))}
+          </View>
+
+          <Text selectable style={{ color: palette.text, fontSize: 19, fontWeight: '700', marginTop: 6 }}>
+            Projects
+          </Text>
+        </View>
+      }
+      ListEmptyComponent={
+        <View
+          style={{
+            minHeight: 150,
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 8,
+            borderRadius: 20,
+            borderWidth: 1,
+            borderStyle: 'dashed',
+            borderColor: palette.border,
+          }}>
+          {loading ? (
+            <ActivityIndicator color={palette.accent} />
+          ) : (
+            <>
+              <Text style={{ color: palette.text, fontSize: 17, fontWeight: '700' }}>No projects yet</Text>
+              <Text style={{ color: palette.muted, fontSize: 14 }}>Your first import will appear here.</Text>
+            </>
+          )}
+        </View>
+      }
+      renderItem={({ item }) => (
+        <Pressable
+          onPress={() =>
+            router.push({
+              pathname: '/editor',
+              params: {
+                projectId: item.id,
+                uri: item.source.uri,
+                name: item.name,
+                durationMs: String(item.source.durationMs),
+              },
+            })
+          }
+          style={{
+            flexDirection: 'row',
+            gap: 14,
+            padding: 12,
+            borderRadius: 18,
+            backgroundColor: palette.surfaceRaised,
+          }}>
+          <Image
+            source={{ uri: item.source.uri }}
+            style={{ width: 74, height: 74, borderRadius: 12, backgroundColor: '#050607' }}
+            contentFit="cover"
+          />
+          <View style={{ flex: 1, justifyContent: 'center', gap: 5 }}>
+            <Text numberOfLines={1} style={{ color: palette.text, fontSize: 16, fontWeight: '700' }}>
+              {item.name}
+            </Text>
+            <Text style={{ color: palette.muted, fontSize: 13 }}>
+              {item.captions.length} subtitles · {formatDuration(item.source.durationMs)}
+            </Text>
+          </View>
+        </Pressable>
+      )}
+    />
   );
 }
 
-export default function HomeScreen() {
-  return (
-    <ThemedView style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
-        <ThemedView style={styles.heroSection}>
-          <AnimatedIcon />
-          <ThemedText type="title" style={styles.title}>
-            Welcome to&nbsp;Expo
-          </ThemedText>
-        </ThemedView>
-
-        <ThemedText type="code" style={styles.code}>
-          get started
-        </ThemedText>
-
-        <ThemedView type="backgroundElement" style={styles.stepContainer}>
-          <HintRow
-            title="Try editing"
-            hint={<ThemedText type="code">src/app/index.tsx</ThemedText>}
-          />
-          <HintRow title="Dev tools" hint={getDevMenuHint()} />
-          <HintRow
-            title="Fresh start"
-            hint={<ThemedText type="code">npm run reset-project</ThemedText>}
-          />
-        </ThemedView>
-
-        {Platform.OS === 'web' && <WebBadge />}
-      </SafeAreaView>
-    </ThemedView>
-  );
+function formatDuration(durationMs: number) {
+  const seconds = Math.round(durationMs / 1000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    flexDirection: 'row',
-  },
-  safeArea: {
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    alignItems: 'center',
-    gap: Spacing.three,
-    paddingBottom: BottomTabInset + Spacing.three,
-    maxWidth: MaxContentWidth,
-  },
-  heroSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    gap: Spacing.four,
-  },
-  title: {
-    textAlign: 'center',
-  },
-  code: {
-    textTransform: 'uppercase',
-  },
-  stepContainer: {
-    gap: Spacing.three,
-    alignSelf: 'stretch',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.four,
-    borderRadius: Spacing.four,
-  },
-});
