@@ -6,6 +6,7 @@ import { groupWordsIntoCaptions } from '@/lib/caption-grouping';
 import { getModel, type TranscriptionModel } from '@/lib/model-catalog';
 import { alignWordsToSpeech } from '@/lib/speech-alignment';
 import { PREPARING_AUDIO_CUES } from '@/lib/transcription-progress';
+import { requireFreeSpace } from '@/services/storage-policy';
 import type { CaptionBlock, WordToken } from '@/types/project';
 
 export type TranscriptionStage =
@@ -25,16 +26,33 @@ export type LocalTranscriptionResult = {
   language: string;
   words: WordToken[];
   captions: CaptionBlock[];
-  audioUri: string;
 };
+
+const activeModelDownloads = new Map<string, Promise<File>>();
 
 const VAD_MODEL = {
   fileName: 'ggml-silero-v6.2.0.bin',
   downloadBytes: 885_098,
+  sha256: '2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987',
   downloadUrl: 'https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin',
 };
 
 export async function ensureModel(
+  modelId: TranscriptionModel['id'],
+  onProgress?: (progress: TranscriptionProgress) => void,
+): Promise<File> {
+  const activeDownload = activeModelDownloads.get(modelId);
+  if (activeDownload) return activeDownload;
+  const operation = downloadModel(modelId, onProgress);
+  activeModelDownloads.set(modelId, operation);
+  try {
+    return await operation;
+  } finally {
+    if (activeModelDownloads.get(modelId) === operation) activeModelDownloads.delete(modelId);
+  }
+}
+
+async function downloadModel(
   modelId: TranscriptionModel['id'],
   onProgress?: (progress: TranscriptionProgress) => void,
 ): Promise<File> {
@@ -43,7 +61,7 @@ export async function ensureModel(
   modelDirectory.create({ idempotent: true, intermediates: true });
   const modelFile = new File(modelDirectory, model.fileName);
 
-  if (modelFile.exists && modelFile.size === model.downloadBytes) {
+  if (await verifyModelFile(modelFile, model.downloadBytes, model.sha256)) {
     return modelFile;
   }
 
@@ -53,7 +71,9 @@ export async function ensureModel(
     detail: `Downloading ${model.label} model once for offline use`,
   });
 
-  await File.downloadFileAsync(model.downloadUrl, modelFile, {
+  const temporaryFile = new File(modelDirectory, `${model.fileName}.download`);
+  if (temporaryFile.exists) temporaryFile.delete();
+  await File.downloadFileAsync(model.downloadUrl, temporaryFile, {
     idempotent: true,
     onProgress: ({ bytesWritten, totalBytes }) => {
       const denominator = totalBytes > 0 ? totalBytes : model.downloadBytes;
@@ -64,7 +84,17 @@ export async function ensureModel(
       });
     },
   });
-
+  if (temporaryFile.size !== model.downloadBytes) {
+    temporaryFile.delete();
+    throw new Error(`The ${model.label} model download was incomplete. Try again on a stable connection.`);
+  }
+  if (await CaptionMedia.sha256(temporaryFile.uri) !== model.sha256) {
+    temporaryFile.delete();
+    throw new Error(`The ${model.label} model failed its security check. Delete it and try again.`);
+  }
+  if (modelFile.exists) modelFile.delete();
+  await temporaryFile.move(modelFile);
+  new File(modelDirectory, `${model.fileName}.sha256`).write(model.sha256);
   return modelFile;
 }
 
@@ -72,14 +102,16 @@ async function ensureVadModel(onProgress?: (progress: TranscriptionProgress) => 
   const modelDirectory = new Directory(Paths.document, 'models');
   modelDirectory.create({ idempotent: true, intermediates: true });
   const modelFile = new File(modelDirectory, VAD_MODEL.fileName);
-  if (modelFile.exists && modelFile.size === VAD_MODEL.downloadBytes) return modelFile;
+  if (await verifyModelFile(modelFile, VAD_MODEL.downloadBytes, VAD_MODEL.sha256)) return modelFile;
 
   onProgress?.({
     stage: 'downloading-model',
     progress: 0,
     detail: 'Downloading the small offline silence detector once',
   });
-  await File.downloadFileAsync(VAD_MODEL.downloadUrl, modelFile, {
+  const temporaryFile = new File(modelDirectory, `${VAD_MODEL.fileName}.download`);
+  if (temporaryFile.exists) temporaryFile.delete();
+  await File.downloadFileAsync(VAD_MODEL.downloadUrl, temporaryFile, {
     idempotent: true,
     onProgress: ({ bytesWritten, totalBytes }) => onProgress?.({
       stage: 'downloading-model',
@@ -87,13 +119,30 @@ async function ensureVadModel(onProgress?: (progress: TranscriptionProgress) => 
       detail: 'Downloading offline silence detector',
     }),
   });
+  if (temporaryFile.size !== VAD_MODEL.downloadBytes || await CaptionMedia.sha256(temporaryFile.uri) !== VAD_MODEL.sha256) {
+    if (temporaryFile.exists) temporaryFile.delete();
+    throw new Error('The silence-detector model failed its security check. Try the download again.');
+  }
+  if (modelFile.exists) modelFile.delete();
+  await temporaryFile.move(modelFile);
+  new File(modelDirectory, `${VAD_MODEL.fileName}.sha256`).write(VAD_MODEL.sha256);
   return modelFile;
+}
+
+async function verifyModelFile(file: File, expectedBytes: number, expectedSha256: string) {
+  if (!file.exists || file.size !== expectedBytes) return false;
+  const marker = new File(file.parentDirectory, `${file.name}.sha256`);
+  if (marker.exists && (await marker.text()).trim() === expectedSha256) return true;
+  if (await CaptionMedia.sha256(file.uri) !== expectedSha256) return false;
+  marker.write(expectedSha256);
+  return true;
 }
 
 export async function transcribeVideoLocally(options: {
   projectId: string;
   videoUri: string;
   modelId: TranscriptionModel['id'];
+  durationMs: number;
   language?: string;
   onProgress?: (progress: TranscriptionProgress) => void;
 }): Promise<LocalTranscriptionResult> {
@@ -101,6 +150,13 @@ export async function transcribeVideoLocally(options: {
   const audioDirectory = new Directory(Paths.cache, 'caption-audio');
   audioDirectory.create({ idempotent: true, intermediates: true });
   const audioFile = new File(audioDirectory, `${projectId}.wav`);
+  const model = getModel(modelId);
+  const modelFile = new File(new Directory(Paths.document, 'models'), model.fileName);
+  const estimatedWavBytes = Math.ceil(Math.max(0, options.durationMs) / 1000) * 32_000 + 44;
+  const modelBytes = modelFile.exists && modelFile.size === model.downloadBytes ? 0 : model.downloadBytes;
+  await requireFreeSpace(estimatedWavBytes + modelBytes + 128 * 1024 * 1024, 'generate captions');
+
+  try {
 
   onProgress?.({
     stage: 'preparing-audio',
@@ -217,10 +273,12 @@ export async function transcribeVideoLocally(options: {
       language: result.language || options.language || 'en',
       words,
       captions,
-      audioUri: audioFile.uri,
     };
   } finally {
     await context.release();
+  }
+  } finally {
+    if (audioFile.exists) audioFile.delete();
   }
 }
 

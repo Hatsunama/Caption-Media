@@ -14,7 +14,7 @@ Caption Studio is an Android-only, local-first automatic subtitle editor. Import
 
 Android may show a Play Protect warning because this independent APK is not installed through Google Play. Check that the address is this repository before continuing. Never download the APK from a mirror or reposting site.
 
-The current beta APK supports 64-bit ARM Android devices running Android 7 or newer, including the Solana Seeker and nearly all current physical Android phones. The source project retains React Native targets for 32-bit ARM, x86, and x86_64 builds as well.
+The current universal APK supports Android 7 or newer and includes 64-bit ARM, 32-bit ARM, x86, and x86_64 native builds. That includes the Solana Seeker and nearly all current physical Android phones.
 
 ### From Termux on the phone
 
@@ -49,7 +49,8 @@ The first time `adb devices` runs, unlock the phone. Tap **Allow** on **Allow US
 
 ## What the current Android build includes
 
-- Android video import with source-orientation-aware preview
+- Storage-efficient Android video import that keeps a durable link to the selected source instead of duplicating the full video into app cache
+- Source-orientation-aware preview
 - Persistent first-frame thumbnails in the editor and project list, with readable date/time names replacing UUIDs and camera-number filenames
 - A dedicated `com.hatsunama.captionstudio` Android identity so Caption Studio installs as its own app
 - On-device Whisper transcription through `whisper.rn`
@@ -76,7 +77,7 @@ The first time `adb devices` runs, unlock the phone. Tap **Allow** on **Allow US
 - Nondestructive video split, clip deletion, and edge trimming with magnetic ripple updates to timed captions and visual layers
 - Local SQLite project snapshots
 
-Styled MP4/SRT/ASS export and production signing remain pre-release work. Video cuts are currently represented and previewed nondestructively in the project timeline; final rendered-video export is not yet available. The source video is never rewritten by editing operations.
+Styled MP4/SRT/ASS export remains pre-release work. Video cuts are currently represented and previewed nondestructively in the project timeline; final rendered-video export is not yet available. Production APKs use the dedicated Caption Studio release identity described below. The source video is never rewritten by editing operations.
 
 ## Architecture
 
@@ -101,7 +102,7 @@ Video and text transforms use normalized coordinates so projects remain portable
 
 Requirements: Node.js 20+, Android SDK 36, JDK 17, and an Android device with USB debugging enabled.
 
-Clone to a short path such as `C:\Caption-Media` or `D:\Caption-Media`. Android's native CMake build can exceed Windows' object-file path limit when the repository is nested deeply under Documents.
+Clone to a short path such as `C:\Caption-Media`. Android's native CMake build can exceed Windows' object-file path limit when the repository is nested deeply under Documents.
 
 ```powershell
 git clone https://github.com/Hatsunama/Caption-Media.git C:\Caption-Media
@@ -111,6 +112,10 @@ npm run android
 ```
 
 `npm run android` generates the native Android project, applies the repository's Windows/Gradle compatibility patch, builds the app, installs it on the connected device, and launches it.
+
+Official release builds use a dedicated Caption Studio signing key, never Expo's checked-in debug key. The private keystore and `CAPTION_STUDIO_RELEASE_*` Gradle properties stay outside the repository. Maintainers build and verify the production-key APK with `npm run release:android`. The checked-in certificate lineage exists only to make a one-time local migration build for devices that previously received the old beta; it is not applied to public production APKs.
+
+The release keystore and its private Gradle properties are the permanent Android update identity. Maintainers must keep an encrypted backup outside the repository; losing that key prevents future APK updates under the same package identity.
 
 For an already-installed development build:
 

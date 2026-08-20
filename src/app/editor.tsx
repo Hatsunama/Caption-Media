@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useEventListener } from 'expo';
-import { Directory, File, Paths } from 'expo-file-system';
 import { Image } from 'expo-image';
-import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import {
@@ -17,7 +15,6 @@ import {
   View,
 } from 'react-native';
 
-import CaptionMedia from '../../modules/caption-media/src/CaptionMediaModule';
 import { AnimationBrowser } from '@/components/editor/animation-browser';
 import { CaptionOverlay } from '@/components/editor/caption-overlay';
 import { FontBrowser } from '@/components/editor/font-browser';
@@ -29,7 +26,16 @@ import { VideoTransformOverlay } from '@/components/editor/video-transform-overl
 import { findAnimationPreset } from '@/lib/animation-presets';
 import { fontChoicePatch, type FontChoice } from '@/lib/font-catalog';
 import { applyStylePatch, mergeStyle, resolveCaptionStyle, type StyleScope } from '@/lib/style-resolver';
+import {
+  buildClipTimeline,
+  rippleDelete,
+  rippleTimedContent,
+  timelineEntryAt,
+  totalClipDuration,
+} from '@/lib/video-timeline';
 import { getProject, saveProject } from '@/services/database';
+import { pickAndStoreImage } from '@/services/media-import';
+import { validateProjectSource } from '@/services/project-media';
 import {
   transcribeVideoLocally,
   type TranscriptionProgress,
@@ -42,7 +48,6 @@ import {
   type ImageVisualLayer,
   type TextVisualLayer,
   type VideoClip,
-  type VisualLayer,
 } from '@/types/project';
 
 const palette = {
@@ -63,15 +68,36 @@ type PendingStyleChange = {
 type EditorTool = 'captions' | 'fonts' | 'animate' | 'video';
 
 export default function EditorScreen() {
-  const params = useLocalSearchParams<{
-    projectId: string;
-    uri: string;
-    name: string;
-    thumbnailUri?: string;
-    durationMs?: string;
-  }>();
+  const { projectId } = useLocalSearchParams<{ projectId: string }>();
+  const [initialProject, setInitialProject] = useState<CaptionProject>();
+  const [loadError, setLoadError] = useState<string>();
+
+  useEffect(() => {
+    let active = true;
+    void getProject(projectId)
+      .then((stored) => {
+        if (!active) return;
+        if (!stored) throw new Error('This project no longer exists on this device.');
+        setInitialProject(stored);
+      })
+      .catch((caught) => {
+        if (active) setLoadError(caught instanceof Error ? caught.message : 'The project could not be opened.');
+      });
+    return () => { active = false; };
+  }, [projectId]);
+
+  if (loadError) {
+    return <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 28, backgroundColor: palette.background }}><Text selectable style={{ color: '#FFBBC8', textAlign: 'center' }}>{loadError}</Text></View>;
+  }
+  if (!initialProject) {
+    return <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.background }}><ActivityIndicator color={palette.accent} /></View>;
+  }
+  return <EditorWorkspace key={initialProject.id} initialProject={initialProject} />;
+}
+
+function EditorWorkspace({ initialProject }: { initialProject: CaptionProject }) {
   const { height, width } = useWindowDimensions();
-  const [project, setProject] = useState<CaptionProject>(() => createProject(params));
+  const [project, setProject] = useState(initialProject);
   const projectRef = useRef(project);
 
   useEffect(() => {
@@ -95,7 +121,15 @@ export default function EditorScreen() {
   const interactionStartRef = useRef<CaptionProject | undefined>(undefined);
   const [historyVersion, setHistoryVersion] = useState(0);
 
-  const player = useVideoPlayer(params.uri, (instance) => {
+  const persistProject = async (next: CaptionProject) => {
+    try {
+      await saveProject(next);
+    } catch (caught) {
+      setError(caught instanceof Error ? `Project could not be saved: ${caught.message}` : 'Project could not be saved.');
+    }
+  };
+
+  const player = useVideoPlayer(initialProject.source.uri, (instance) => {
     instance.timeUpdateEventInterval = 0.05;
   });
 
@@ -146,49 +180,16 @@ export default function EditorScreen() {
 
   useEffect(() => {
     let active = true;
-    void getProject(params.projectId).then(async (stored) => {
+    void validateProjectSource(initialProject.source.uri).catch((caught) => {
       if (!active) return;
-      if (stored) {
-        setProject(stored);
-        setSelectedCaptionId(stored.captions[0]?.id);
-        return;
-      }
-      await saveProject(projectRef.current);
-      try {
-        const info = await CaptionMedia.getMediaInfo(params.uri);
-        if (!active) return;
-        setProject((current) => {
-          const displaySize = orientedSize(info.width, info.height, info.rotation);
-          const next = {
-            ...current,
-            source: {
-              ...current.source,
-              durationMs: info.durationMs || current.source.durationMs,
-              width: info.width,
-              height: info.height,
-              rotation: info.rotation,
-            },
-            canvas:
-              current.canvas.preset === 'source'
-                ? { ...current.canvas, aspectWidth: displaySize.width, aspectHeight: displaySize.height }
-                : current.canvas,
-            clips:
-              current.clips.length === 1 && current.clips[0].sourceEndMs <= 0
-                ? [{ ...current.clips[0], sourceEndMs: info.durationMs }]
-                : current.clips,
-          };
-          projectRef.current = next;
-          void saveProject(next);
-          return next;
-        });
-      } catch {
-        // The preview remains usable even if metadata is unavailable.
-      }
+      setError(
+        caught instanceof Error
+          ? `The source video is unavailable: ${caught.message}`
+          : 'The source video is unavailable. Reconnect or reselect the original file.',
+      );
     });
-    return () => {
-      active = false;
-    };
-  }, [params.projectId, params.uri]);
+    return () => { active = false; };
+  }, [initialProject.source.uri]);
 
   const activeCaption = useMemo(
     () => project.captions.find((caption) => currentMs >= caption.startMs && currentMs < caption.endMs),
@@ -227,7 +228,7 @@ export default function EditorScreen() {
     const snapshot = interactionStartRef.current;
     interactionStartRef.current = undefined;
     if (snapshot && snapshot !== projectRef.current) pushUndo(snapshot);
-    void saveProject(projectRef.current);
+    persistProject(projectRef.current);
   };
 
   const undo = () => {
@@ -240,7 +241,7 @@ export default function EditorScreen() {
     setSelectedCaptionId((id) => previous.captions.some((caption) => caption.id === id) ? id : previous.captions[0]?.id);
     setSelectedLayerId((id) => previous.layers.some((layer) => layer.id === id) ? id : 'captions');
     setHistoryVersion((value) => value + 1);
-    void saveProject(previous);
+    persistProject(previous);
   };
 
   const redo = () => {
@@ -253,7 +254,7 @@ export default function EditorScreen() {
     setSelectedCaptionId((id) => next.captions.some((caption) => caption.id === id) ? id : next.captions[0]?.id);
     setSelectedLayerId((id) => next.layers.some((layer) => layer.id === id) ? id : 'captions');
     setHistoryVersion((value) => value + 1);
-    void saveProject(next);
+    persistProject(next);
   };
 
   const generateCaptions = async () => {
@@ -263,6 +264,7 @@ export default function EditorScreen() {
         projectId: project.id,
         videoUri: project.source.uri,
         modelId: 'fast',
+        durationMs: project.source.durationMs,
         language: 'en',
         onProgress: setProgress,
       });
@@ -281,7 +283,7 @@ export default function EditorScreen() {
       pushUndo();
       setProject(next);
       setSelectedCaptionId(next.captions[0]?.id);
-      await saveProject(next);
+      await persistProject(next);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Caption generation failed');
     } finally {
@@ -317,7 +319,7 @@ export default function EditorScreen() {
     projectRef.current = next;
     setProject(next);
     setPendingChange(undefined);
-    await saveProject(next);
+    await persistProject(next);
   };
 
   const chooseFont = (choice: FontChoice) => {
@@ -347,7 +349,7 @@ export default function EditorScreen() {
         animation: { id, intensity: preset.intensity, durationMs: preset.durationMs },
       });
       projectRef.current = next;
-      void saveProject(next);
+      persistProject(next);
       return next;
     });
   };
@@ -375,21 +377,22 @@ export default function EditorScreen() {
       setProject(next);
       setEditingLayerId(undefined);
       setEditingText(undefined);
-      await saveProject(next);
+      await persistProject(next);
       return;
     }
     if (!editingCaptionId) return;
     const next: CaptionProject = {
-      ...project,
+      ...projectRef.current,
       updatedAt: new Date().toISOString(),
-      captions: project.captions.map((caption) =>
+      captions: projectRef.current.captions.map((caption) =>
         caption.id === editingCaptionId ? { ...caption, text: editingText.trim() } : caption,
       ),
     };
+    projectRef.current = next;
     setProject(next);
     setEditingCaptionId(undefined);
     setEditingText(undefined);
-    await saveProject(next);
+    await persistProject(next);
   };
 
   const updateTextLayerStyle = (layerId: string, patch: CaptionStylePatch, persist = false) => {
@@ -405,15 +408,14 @@ export default function EditorScreen() {
         ),
       };
       projectRef.current = next;
-      if (persist) void saveProject(next);
+      if (persist) persistProject(next);
       return next;
     });
   };
 
-  const updateCaptionTransform = (patch: CaptionStylePatch) => {
+  const updateSharedCaptionTransform = (patch: CaptionStylePatch) => {
     if (!selectedCaptionId) return;
     setProject((current) => {
-      // On-canvas geometry is a project layout choice: every caption follows it.
       const next = applyStylePatch(current, selectedCaptionId, 'all', patch);
       projectRef.current = next;
       return next;
@@ -500,6 +502,7 @@ export default function EditorScreen() {
       layers.splice(index, 0, layer);
       const next = { ...current, updatedAt: new Date().toISOString(), layers };
       projectRef.current = next;
+      persistProject(next);
       return next;
     });
     player.pause();
@@ -510,24 +513,24 @@ export default function EditorScreen() {
   };
 
   const addImageLayer = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 1 });
-    if (result.canceled) return;
-    pushUndo();
-    const asset = result.assets[0];
     const id = uniqueId('image');
-    const extension = asset.fileName?.match(/\.[a-z0-9]+$/i)?.[0] ?? '.jpg';
-    const directory = new Directory(Paths.document, 'projects', projectRef.current.id, 'overlays');
-    directory.create({ idempotent: true, intermediates: true });
-    const destination = new File(directory, `${id}${extension}`);
-    await new File(asset.uri).copy(destination, { overwrite: true });
+    let stored;
+    try {
+      stored = await pickAndStoreImage(projectRef.current.id, id);
+    } catch (caught) {
+      Alert.alert('Could not add image', caught instanceof Error ? caught.message : 'The selected image could not be saved.');
+      return;
+    }
+    if (!stored) return;
+    pushUndo();
     const duration = Math.max(500, timelineDurationMs);
     const startMs = clamp(currentMs, 0, Math.max(0, duration - 500));
     const layer: ImageVisualLayer = {
       id,
       kind: 'image',
-      name: asset.fileName?.slice(0, 18) || 'Sticker',
+      name: stored.name.slice(0, 18) || 'Sticker',
       visible: true,
-      uri: destination.uri,
+      uri: stored.uri,
       startMs,
       endMs: Math.min(duration, startMs + 3000),
       position: { x: 0.5, y: 0.5 },
@@ -538,7 +541,7 @@ export default function EditorScreen() {
     setProject((current) => {
       const next = { ...current, updatedAt: new Date().toISOString(), layers: [...current.layers, layer] };
       projectRef.current = next;
-      void saveProject(next);
+      persistProject(next);
       return next;
     });
     player.pause();
@@ -556,7 +559,7 @@ export default function EditorScreen() {
       [layers[index], layers[destination]] = [layers[destination], layers[index]];
       const next = { ...current, updatedAt: new Date().toISOString(), layers };
       projectRef.current = next;
-      void saveProject(next);
+      persistProject(next);
       return next;
     });
   };
@@ -567,7 +570,7 @@ export default function EditorScreen() {
     setProject((current) => {
       const next = { ...current, updatedAt: new Date().toISOString(), layers: current.layers.filter((layer) => layer.id !== layerId) };
       projectRef.current = next;
-      void saveProject(next);
+      persistProject(next);
       return next;
     });
     setSelectedLayerId('captions');
@@ -587,7 +590,7 @@ export default function EditorScreen() {
       clips.splice(index, 1, left, right);
       const next = { ...current, updatedAt: new Date().toISOString(), clips };
       projectRef.current = next;
-      void saveProject(next);
+      persistProject(next);
       return next;
     });
     activeClipIdRef.current = right.id;
@@ -604,7 +607,7 @@ export default function EditorScreen() {
     setProject(next);
     setSelectedClipId(next.clips[0]?.id);
     activeClipIdRef.current = next.clips[0]?.id;
-    void saveProject(next);
+    persistProject(next);
     queueMicrotask(() => seekTimeline(Math.min(entry.startMs, Math.max(0, totalClipDuration(next.clips) - 1))));
   };
 
@@ -631,7 +634,7 @@ export default function EditorScreen() {
     };
     projectRef.current = next;
     setProject(next);
-    void saveProject(next);
+    persistProject(next);
     player.pause();
     queueMicrotask(() => seekTimeline(Math.min(cutStartMs, Math.max(0, totalClipDuration(next.clips) - 1))));
   };
@@ -650,7 +653,7 @@ export default function EditorScreen() {
     projectRef.current = next;
     setProject(next);
     setSelectedCaptionId(captions[Math.min(index, captions.length - 1)]?.id);
-    void saveProject(next);
+    persistProject(next);
   };
 
   const confirmDeleteCaption = (captionId: string) => {
@@ -662,19 +665,20 @@ export default function EditorScreen() {
 
   const setCanvasPreset = async (preset: CaptionProject['canvas']['preset']) => {
     pushUndo();
-    const size = canvasPresetSize(preset, project);
+    const size = canvasPresetSize(preset, projectRef.current);
     const next = {
-      ...project,
+      ...projectRef.current,
       updatedAt: new Date().toISOString(),
       canvas: {
-        ...project.canvas,
+        ...projectRef.current.canvas,
         preset,
         aspectWidth: size.width,
         aspectHeight: size.height,
       },
     };
+    projectRef.current = next;
     setProject(next);
-    await saveProject(next);
+    await persistProject(next);
   };
 
   return (
@@ -735,7 +739,7 @@ export default function EditorScreen() {
                   currentMs={currentMs}
                   interactive={activeTool !== 'video' && selectedLayerId === 'captions' && Boolean(selectedCaptionId) && displayCaption?.id === selectedCaptionId}
                   onInteractionStart={() => { player.pause(); beginHistoryInteraction(); }}
-                  onTransform={updateCaptionTransform}
+                  onTransform={updateSharedCaptionTransform}
                   onTransformEnd={finishHistoryInteraction}
                   onDelete={selectedCaptionId ? () => confirmDeleteCaption(selectedCaptionId) : undefined}
                 />
@@ -949,7 +953,7 @@ export default function EditorScreen() {
               label="Reset all caption boxes"
               onPress={() => {
                 beginHistoryInteraction();
-                updateCaptionTransform({ position: { x: 0.5, y: 0.78 }, box: { width: 0.86, height: 0.2 }, fontSize: 48, rotation: 0 });
+                updateSharedCaptionTransform({ position: { x: 0.5, y: 0.78 }, box: { width: 0.86, height: 0.2 }, fontSize: 48, rotation: 0 });
                 queueMicrotask(finishHistoryInteraction);
               }}
             />
@@ -981,7 +985,6 @@ export default function EditorScreen() {
           <ToolbarItem label="Fonts" active={activeTool === 'fonts'} onPress={() => { setActiveTool('fonts'); setFontBrowserOpen(true); }} />
           <ToolbarItem label="Animate" active={activeTool === 'animate'} onPress={() => setActiveTool('animate')} />
           <ToolbarItem label="Video" active={activeTool === 'video'} onPress={() => setActiveTool('video')} />
-          <ToolbarItem label="Export" disabled />
         </View>
       </View>
 
@@ -1012,51 +1015,6 @@ export default function EditorScreen() {
       <ProgressOverlay progress={progress} />
     </View>
   );
-}
-
-function createProject(params: { projectId: string; uri: string; name: string; thumbnailUri?: string; durationMs?: string }): CaptionProject {
-  const now = new Date().toISOString();
-  const durationMs = Number(params.durationMs ?? 0);
-  return {
-    schemaVersion: 1,
-    id: params.projectId,
-    name: params.name,
-    createdAt: now,
-    updatedAt: now,
-    source: {
-      uri: params.uri,
-      thumbnailUri: params.thumbnailUri || undefined,
-      displayName: params.name,
-      durationMs,
-    },
-    transcription: {
-      language: 'en',
-      modelId: 'fast',
-      words: [],
-    },
-    captions: [],
-    projectStyle: DEFAULT_CAPTION_STYLE,
-    layers: [{ id: 'captions', kind: 'captions', name: 'Captions', visible: true }],
-    clips: [{ id: 'source-clip', sourceStartMs: 0, sourceEndMs: durationMs }],
-    canvas: {
-      preset: 'source',
-      aspectWidth: 9,
-      aspectHeight: 16,
-      backgroundColor: '#000000',
-    },
-    videoTransform: {
-      fit: 'fit',
-      position: { x: 0.5, y: 0.5 },
-      scale: 1,
-      rotation: 0,
-    },
-    videoEdits: [],
-    export: {
-      resolution: '1080p',
-      format: 'mp4',
-      burnCaptions: true,
-    },
-  };
 }
 
 function Action(props: { label: string; color?: string; danger?: boolean; onPress: () => void }) {
@@ -1200,84 +1158,6 @@ function fitRect(aspect: number, maxWidth: number, maxHeight: number) {
     width = height * aspect;
   }
   return { width, height };
-}
-
-type ClipTimelineEntry = { clip: VideoClip; startMs: number; endMs: number };
-
-function buildClipTimeline(clips: VideoClip[]): ClipTimelineEntry[] {
-  let cursor = 0;
-  return clips.map((clip) => {
-    const startMs = cursor;
-    cursor += Math.max(0, clip.sourceEndMs - clip.sourceStartMs);
-    return { clip, startMs, endMs: cursor };
-  });
-}
-
-function timelineEntryAt(entries: ClipTimelineEntry[], timelineMs: number) {
-  if (entries.length === 0) return undefined;
-  return entries.find((entry) => timelineMs >= entry.startMs && timelineMs < entry.endMs)
-    ?? (timelineMs >= entries[entries.length - 1].endMs ? entries[entries.length - 1] : entries[0]);
-}
-
-function totalClipDuration(clips: VideoClip[]) {
-  return clips.reduce((total, clip) => total + Math.max(0, clip.sourceEndMs - clip.sourceStartMs), 0);
-}
-
-function rippleDelete(project: CaptionProject, cutStartMs: number, cutEndMs: number, clipId: string): CaptionProject {
-  const rippled = rippleTimedContent(project, cutStartMs, cutEndMs);
-  return {
-    ...rippled,
-    clips: project.clips.filter((clip) => clip.id !== clipId),
-  };
-}
-
-function rippleTimedContent(project: CaptionProject, cutStartMs: number, cutEndMs: number): CaptionProject {
-  const words = project.transcription.words
-    .map((word) => {
-      const range = rippleRange(word.startMs, word.endMs, cutStartMs, cutEndMs);
-      return range ? { ...word, ...range } : undefined;
-    })
-    .filter((word): word is NonNullable<typeof word> => Boolean(word));
-  const wordMap = new Map(words.map((word) => [word.id, word]));
-  const captions = project.captions
-    .map((caption) => {
-      const range = rippleRange(caption.startMs, caption.endMs, cutStartMs, cutEndMs);
-      if (!range) return undefined;
-      const wordIds = caption.wordIds.filter((id) => wordMap.has(id));
-      const text = wordIds.length > 0 ? wordIds.map((id) => wordMap.get(id)?.text).filter(Boolean).join(' ') : caption.text;
-      return { ...caption, ...range, wordIds, text };
-    })
-    .filter((caption): caption is NonNullable<typeof caption> => Boolean(caption));
-  const layers = project.layers
-    .map((layer) => {
-      if (layer.kind === 'captions') return layer;
-      const range = rippleRange(layer.startMs, layer.endMs, cutStartMs, cutEndMs);
-      return range ? { ...layer, ...range } : undefined;
-    })
-    .filter((layer): layer is VisualLayer => Boolean(layer));
-  return {
-    ...project,
-    updatedAt: new Date().toISOString(),
-    transcription: { ...project.transcription, words },
-    captions,
-    layers,
-  };
-}
-
-function rippleRange(startMs: number, endMs: number, cutStartMs: number, cutEndMs: number) {
-  const removed = Math.max(0, cutEndMs - cutStartMs);
-  if (endMs <= cutStartMs) return { startMs, endMs };
-  if (startMs >= cutEndMs) return { startMs: startMs - removed, endMs: endMs - removed };
-  if (startMs < cutStartMs && endMs > cutEndMs) return { startMs, endMs: endMs - removed };
-  if (startMs < cutStartMs) {
-    const next = { startMs, endMs: cutStartMs };
-    return next.endMs - next.startMs >= 80 ? next : undefined;
-  }
-  if (endMs > cutEndMs) {
-    const next = { startMs: cutStartMs, endMs: endMs - removed };
-    return next.endMs - next.startMs >= 80 ? next : undefined;
-  }
-  return undefined;
 }
 
 function uniqueId(prefix: string) {

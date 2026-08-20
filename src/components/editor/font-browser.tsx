@@ -1,10 +1,13 @@
-import { useMemo, useState } from 'react';
-import * as DocumentPicker from 'expo-document-picker';
-import { Directory, File, Paths } from 'expo-file-system';
-import * as Font from 'expo-font';
-import { FlatList, Modal, Pressable, Text, TextInput, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { Alert, FlatList, Modal, Pressable, Text, TextInput, View } from 'react-native';
 
 import { BUILT_IN_FONT_CHOICES, type FontChoice } from '@/lib/font-catalog';
+import {
+  importFontFromDevice,
+  loadFontLibrary,
+  saveFontFavorites,
+  saveRecentFonts,
+} from '@/services/font-storage';
 
 type Filter = 'all' | 'favorites' | 'recent' | 'imported';
 
@@ -19,6 +22,7 @@ export function FontBrowser(props: {
   const [imported, setImported] = useState<FontChoice[]>([]);
   const [favorites, setFavorites] = useState<string[]>(['bungee', 'monoton', 'rubik-glitch']);
   const [recent, setRecent] = useState<string[]>([]);
+  const [libraryLoaded, setLibraryLoaded] = useState(false);
   const allFonts = useMemo(() => [...imported, ...BUILT_IN_FONT_CHOICES], [imported]);
   const fonts = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -31,36 +35,39 @@ export function FontBrowser(props: {
     });
   }, [allFonts, favorites, filter, recent, search]);
 
+  useEffect(() => {
+    if (!props.visible || libraryLoaded) return;
+    let active = true;
+    void loadFontLibrary()
+      .then((library) => {
+        if (!active) return;
+        setImported(library.imported);
+        setFavorites(library.favorites);
+        setRecent(library.recent);
+        setLibraryLoaded(true);
+      })
+      .catch((error) => Alert.alert('Could not load fonts', error instanceof Error ? error.message : 'Font storage is unavailable.'));
+    return () => { active = false; };
+  }, [libraryLoaded, props.visible]);
+
   const selectFont = (choice: FontChoice) => {
-    setRecent((current) => [choice.font.id, ...current.filter((id) => id !== choice.font.id)].slice(0, 8));
+    setRecent((current) => {
+      const next = [choice.font.id, ...current.filter((id) => id !== choice.font.id)].slice(0, 8);
+      void saveRecentFonts(next);
+      return next;
+    });
     props.onSelect(choice);
   };
 
   const importFont = async () => {
-    const result = await DocumentPicker.getDocumentAsync({
-      type: ['font/ttf', 'font/otf', 'application/x-font-ttf', 'application/x-font-opentype', 'application/vnd.ms-opentype'],
-      copyToCacheDirectory: true,
-      multiple: false,
-    });
-    if (result.canceled) return;
-
-    const asset = result.assets[0];
-    const extension = asset.name.toLowerCase().endsWith('.otf') ? '.otf' : '.ttf';
-    const family = `imported-${Date.now()}`;
-    const directory = new Directory(Paths.document, 'fonts');
-    directory.create({ idempotent: true, intermediates: true });
-    const destination = new File(directory, `${family}${extension}`);
-    await new File(asset.uri).copy(destination, { overwrite: true });
-    await Font.loadAsync({ [family]: destination.uri });
-    const name = asset.name.replace(/\.(ttf|otf)$/i, '');
-    const choice: FontChoice = {
-      font: { id: family, family, source: 'imported', uri: destination.uri, postScriptName: name },
-      name,
-      mood: 'Your imported font',
-      treatment: 'solid',
-    };
-    setImported((current) => [choice, ...current]);
-    setFilter('imported');
+    try {
+      const choice = await importFontFromDevice();
+      if (!choice) return;
+      setImported((current) => [choice, ...current]);
+      setFilter('imported');
+    } catch (error) {
+      Alert.alert('Could not import font', error instanceof Error ? error.message : 'The selected font could not be saved.');
+    }
   };
 
   return (
@@ -121,7 +128,11 @@ export function FontBrowser(props: {
                   hitSlop={12}
                   onPress={(event) => {
                     event.stopPropagation();
-                    setFavorites((current) => current.includes(item.font.id) ? current.filter((id) => id !== item.font.id) : [...current, item.font.id]);
+                    setFavorites((current) => {
+                      const next = current.includes(item.font.id) ? current.filter((id) => id !== item.font.id) : [...current, item.font.id];
+                      void saveFontFavorites(next);
+                      return next;
+                    });
                   }}>
                   <Text style={{ color: favorites.includes(item.font.id) ? '#DFFF35' : '#66717E', fontSize: 20 }}>★</Text>
                 </Pressable>

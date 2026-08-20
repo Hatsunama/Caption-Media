@@ -203,7 +203,7 @@ function TimingGrip(props: Parameters<typeof TimedBlock>[0] & { side: 'start' | 
     onPanResponderRelease: () => propsRef.current.onEnd(),
     onPanResponderTerminate: () => propsRef.current.onEnd(),
   }), []);
-  return <View {...responder.panHandlers} style={{ position: 'absolute', [props.side === 'start' ? 'left' : 'right']: -9, top: -2, bottom: -2, width: 22, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: props.selected ? '#FFFFFF' : `${props.color}F2`, opacity: props.selected ? 1 : 0.78 }}><View pointerEvents="none" style={{ width: 3, height: 16, borderRadius: 2, backgroundColor: props.selected ? '#151A20' : '#FFFFFF' }} /></View>;
+  return <View {...responder.panHandlers} style={{ position: 'absolute', [props.side === 'start' ? 'left' : 'right']: 0, top: 0, bottom: 0, width: 16, borderRadius: 6, alignItems: 'center', justifyContent: 'center', backgroundColor: props.selected ? '#FFFFFF' : 'transparent' }}><View pointerEvents="none" style={{ width: props.selected ? 3 : 2, height: 16, borderRadius: 2, backgroundColor: props.selected ? '#151A20' : '#FFFFFFCC' }} /></View>;
 }
 
 function TinyButton(props: { label: string; danger?: boolean; disabled?: boolean; onPress: () => void }) {

@@ -2,13 +2,19 @@
   "expo": {
     "name": "Caption Studio",
     "slug": "caption-studio",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "captionstudio",
     "userInterfaceStyle": "dark",
     "android": {
       "package": "com.hatsunama.captionstudio",
+      "versionCode": 2,
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#090B0E",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -24,8 +30,6 @@
     "plugins": [
       "expo-router",
       "expo-document-picker",
-      "expo-image-picker",
-      "expo-media-library",
       "expo-sqlite",
       "expo-video",
       [

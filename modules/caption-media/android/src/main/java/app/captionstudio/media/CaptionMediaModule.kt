@@ -1,6 +1,7 @@
 package app.captionstudio.media
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.media.AudioFormat
@@ -17,6 +18,7 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.MessageDigest
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -26,6 +28,14 @@ class CaptionMediaModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("CaptionMedia")
+
+    AsyncFunction("persistReadPermission") { inputUri: String ->
+      persistReadPermission(inputUri)
+    }
+
+    AsyncFunction("sha256") { inputUri: String ->
+      sha256(inputUri)
+    }
 
     AsyncFunction("getMediaInfo") { inputUri: String ->
       readMediaInfo(inputUri)
@@ -40,10 +50,39 @@ class CaptionMediaModule : Module() {
     }
   }
 
+  private fun persistReadPermission(input: String): Boolean {
+    val uri = Uri.parse(input)
+    if (uri.scheme != "content") return true
+    context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    return true
+  }
+
+  private fun sha256(input: String): String {
+    val uri = Uri.parse(input)
+    val stream = if (uri.scheme.isNullOrEmpty() || uri.scheme == "file") {
+      File(uri.path ?: input).inputStream()
+    } else {
+      context.contentResolver.openInputStream(uri)
+        ?: throw IllegalArgumentException("The selected file could not be opened")
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+    stream.use { source ->
+      val buffer = ByteArray(64 * 1024)
+      while (true) {
+        val count = source.read(buffer)
+        if (count < 0) break
+        if (count > 0) digest.update(buffer, 0, count)
+      }
+    }
+    return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+  }
+
   private fun generateVideoThumbnail(input: String, output: String, timeMs: Long): Map<String, Any> {
     val retriever = MediaMetadataRetriever()
+    val targetFile = outputFile(output)
     var frame: Bitmap? = null
     var orientedFrame: Bitmap? = null
+    var completed = false
     return try {
       setRetrieverDataSource(retriever, input)
       val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
@@ -69,23 +108,25 @@ class CaptionMediaModule : Module() {
         Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
       }
 
-      val outputFile = outputFile(output)
-      outputFile.parentFile?.mkdirs()
-      FileOutputStream(outputFile).use { stream ->
-        check(orientedFrame!!.compress(Bitmap.CompressFormat.JPEG, 88, stream)) {
+      val renderedFrame = requireNotNull(orientedFrame)
+      targetFile.parentFile?.mkdirs()
+      FileOutputStream(targetFile).use { stream ->
+        check(renderedFrame.compress(Bitmap.CompressFormat.JPEG, 88, stream)) {
           "The first video frame could not be saved"
         }
       }
+      completed = true
       mapOf(
         "outputUri" to output,
-        "width" to orientedFrame!!.width,
-        "height" to orientedFrame!!.height,
+        "width" to renderedFrame.width,
+        "height" to renderedFrame.height,
         "timeMs" to max(0L, timeMs),
       )
     } finally {
       if (orientedFrame !== frame) orientedFrame?.recycle()
       frame?.recycle()
       retriever.release()
+      if (!completed) targetFile.delete()
     }
   }
 
@@ -128,10 +169,12 @@ class CaptionMediaModule : Module() {
 
   private fun decodeAudioToWav(input: String, output: String): Map<String, Any> {
     val extractor = MediaExtractor()
-    setExtractorDataSource(extractor, input)
+    val targetFile = outputFile(output)
     var decoder: MediaCodec? = null
     var writer: WavWriter? = null
+    var completed = false
     return try {
+      setExtractorDataSource(extractor, input)
       val audioTrack = (0 until extractor.trackCount).firstOrNull { index ->
         extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
       } ?: throw IllegalArgumentException("This video does not contain an audio track")
@@ -148,9 +191,8 @@ class CaptionMediaModule : Module() {
       decoder.configure(inputFormat, null, null, 0)
       decoder.start()
 
-      val outputFile = outputFile(output)
-      outputFile.parentFile?.mkdirs()
-      writer = WavWriter(outputFile, TARGET_SAMPLE_RATE, 1)
+      targetFile.parentFile?.mkdirs()
+      writer = WavWriter(targetFile, TARGET_SAMPLE_RATE, 1)
 
       val info = MediaCodec.BufferInfo()
       var inputEnded = false
@@ -189,7 +231,7 @@ class CaptionMediaModule : Module() {
               AudioFormat.ENCODING_PCM_16BIT
             }
           }
-          MediaCodec.INFO_TRY_AGAIN_LATER, MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
+          MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
           else -> if (outputIndex >= 0) {
             if (info.size > 0) {
               val outputBuffer = decoder.getOutputBuffer(outputIndex)
@@ -227,6 +269,7 @@ class CaptionMediaModule : Module() {
 
       writer.finish()
       val durationMs = writer.sampleCount * 1_000L / TARGET_SAMPLE_RATE
+      completed = true
       mapOf(
         "outputUri" to output,
         "sampleRate" to TARGET_SAMPLE_RATE,
@@ -247,6 +290,7 @@ class CaptionMediaModule : Module() {
       }
       decoder?.release()
       extractor.release()
+      if (!completed) targetFile.delete()
     }
   }
 
@@ -283,7 +327,7 @@ class CaptionMediaModule : Module() {
 
   private fun outputFile(output: String): File {
     val uri = Uri.parse(output)
-    require(uri.scheme.isNullOrEmpty() || uri.scheme == "file") { "Audio output must be an app-local file URI" }
+    require(uri.scheme.isNullOrEmpty() || uri.scheme == "file") { "Output must be an app-local file URI" }
     return File(uri.path ?: output)
   }
 

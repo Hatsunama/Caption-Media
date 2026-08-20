@@ -1,6 +1,5 @@
 import { useCallback, useState } from 'react';
 import { Image } from 'expo-image';
-import * as ImagePicker from 'expo-image-picker';
 import { useFocusEffect, useRouter } from 'expo-router';
 import {
   ActivityIndicator,
@@ -11,9 +10,7 @@ import {
   View,
 } from 'react-native';
 
-import { humanVideoName } from '@/lib/project-presentation';
-import { listProjects, saveProject } from '@/services/database';
-import { ensureProjectThumbnail, preserveImportedVideo } from '@/services/media-storage';
+import { importVideoProject, loadProjectLibrary } from '@/services/project-workflows';
 import type { CaptionProject } from '@/types/project';
 
 const palette = {
@@ -34,28 +31,7 @@ export default function ProjectsScreen() {
 
   const refresh = useCallback(async () => {
     try {
-      const storedProjects = await listProjects();
-      const preparedProjects: CaptionProject[] = [];
-      for (const stored of storedProjects) {
-        const name = humanVideoName(stored.name, stored.createdAt);
-        const thumbnailUri = await ensureProjectThumbnail({
-          projectId: stored.id,
-          videoUri: stored.source.uri,
-          thumbnailUri: stored.source.thumbnailUri,
-        });
-        if (name === stored.name && thumbnailUri === stored.source.thumbnailUri) {
-          preparedProjects.push(stored);
-          continue;
-        }
-        const prepared: CaptionProject = {
-          ...stored,
-          name,
-          source: { ...stored.source, displayName: name, thumbnailUri },
-        };
-        await saveProject(prepared);
-        preparedProjects.push(prepared);
-      }
-      setProjects(preparedProjects);
+      setProjects(await loadProjectLibrary());
     } finally {
       setLoading(false);
     }
@@ -68,31 +44,11 @@ export default function ProjectsScreen() {
   const importVideo = async () => {
     setImporting(true);
     try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['videos'],
-        allowsEditing: false,
-        quality: 1,
-      });
-      if (result.canceled) return;
-
-      const asset = result.assets[0];
-      const importedAt = Date.now();
-      const projectId = `project-${importedAt}`;
-      const preserved = await preserveImportedVideo({
-        projectId,
-        sourceUri: asset.uri,
-        fileName: asset.fileName,
-      });
-      const projectName = humanVideoName(asset.fileName, importedAt);
+      const project = await importVideoProject();
+      if (!project) return;
       router.push({
         pathname: '/editor',
-        params: {
-          uri: preserved.videoUri,
-          thumbnailUri: preserved.thumbnailUri ?? '',
-          name: projectName,
-          durationMs: String(asset.duration ?? 0),
-          projectId,
-        },
+        params: { projectId: project.id },
       });
     } catch (error) {
       Alert.alert(
@@ -201,9 +157,6 @@ export default function ProjectsScreen() {
               pathname: '/editor',
               params: {
                 projectId: item.id,
-                uri: item.source.uri,
-                name: item.name,
-                durationMs: String(item.source.durationMs),
               },
             })
           }

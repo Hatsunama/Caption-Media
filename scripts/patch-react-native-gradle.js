@@ -3,6 +3,7 @@ const path = require('node:path');
 
 const root = path.join(__dirname, '..');
 const buildFile = path.join(root, 'node_modules', '@react-native', 'gradle-plugin', 'build.gradle.kts');
+const appBuildFile = path.join(root, 'android', 'app', 'build.gradle');
 
 function replaceInFile(file, from, to) {
   if (!fs.existsSync(file)) return;
@@ -71,4 +72,56 @@ replaceInFile(
 appendLineIfMissing(
   path.join(root, 'android', 'gradle.properties'),
   'org.gradle.vfs.watch=false',
+);
+
+const signingProperties = `def captionStudioReleaseStoreFile = findProperty('CAPTION_STUDIO_RELEASE_STORE_FILE')
+def captionStudioReleaseStorePassword = findProperty('CAPTION_STUDIO_RELEASE_STORE_PASSWORD')
+def captionStudioReleaseKeyAlias = findProperty('CAPTION_STUDIO_RELEASE_KEY_ALIAS')
+def captionStudioReleaseKeyPassword = findProperty('CAPTION_STUDIO_RELEASE_KEY_PASSWORD')
+def hasCaptionStudioReleaseSigning = [captionStudioReleaseStoreFile, captionStudioReleaseStorePassword, captionStudioReleaseKeyAlias, captionStudioReleaseKeyPassword].every { it }`;
+
+if (fs.existsSync(appBuildFile)) {
+  let source = fs.readFileSync(appBuildFile, 'utf8').replaceAll(`${signingProperties}\n\n`, '');
+  source = source.replace('android {\n', `${signingProperties}\n\nandroid {\n`);
+
+  const signingConfigs = `    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+        if (hasCaptionStudioReleaseSigning) {
+            release {
+                storeFile file(captionStudioReleaseStoreFile)
+                storePassword captionStudioReleaseStorePassword
+                keyAlias captionStudioReleaseKeyAlias
+                keyPassword captionStudioReleaseKeyPassword
+            }
+        }
+    }
+    buildTypes {`;
+  source = source.replace(
+    /    signingConfigs \{[\s\S]*?\n    \}\n    buildTypes \{/,
+    signingConfigs,
+  );
+
+  const buildTypes = `    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            if (hasCaptionStudioReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+`;
+  source = source.replace(
+    /    buildTypes \{[\s\S]*?\n        release \{[\s\S]*?(?=            def enableShrinkResources)/,
+    buildTypes,
+  );
+  fs.writeFileSync(appBuildFile, source);
+}
+appendLineIfMissing(
+  appBuildFile,
+  `gradle.taskGraph.whenReady { graph -> if (graph.allTasks.any { it.name.toLowerCase().contains('release') } && !hasCaptionStudioReleaseSigning) throw new GradleException('Caption Studio release signing credentials are missing. Configure CAPTION_STUDIO_RELEASE_* in the user Gradle properties file.') }`,
 );

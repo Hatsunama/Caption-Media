@@ -9,11 +9,71 @@ import { alignWordsToSpeech } from '../src/lib/speech-alignment.ts';
 import { packTimelineLanes } from '../src/lib/timeline-layout.ts';
 import { PREPARING_AUDIO_CUES } from '../src/lib/transcription-progress.ts';
 import { humanVideoName, isMachineVideoName } from '../src/lib/project-presentation.ts';
+import { buildClipTimeline } from '../src/lib/video-timeline.ts';
 
 test('Caption Studio has an isolated Android identity', () => {
   const appConfig = JSON.parse(readFileSync(new URL('../app.json', import.meta.url), 'utf8'));
   assert.equal(appConfig.expo.android.package, 'com.hatsunama.captionstudio');
   assert.doesNotMatch(JSON.stringify(appConfig), /cuecam/i);
+});
+
+test('video acquisition links the selected source without a hidden picker copy', () => {
+  const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const appConfig = JSON.parse(readFileSync(new URL('../app.json', import.meta.url), 'utf8'));
+  const mediaStorage = readFileSync(new URL('../src/services/media-import.ts', import.meta.url), 'utf8');
+  assert.equal(packageJson.dependencies['expo-image-picker'], undefined);
+  assert.equal(packageJson.dependencies['expo-media-library'], undefined);
+  assert.doesNotMatch(JSON.stringify(appConfig.expo.plugins), /image-picker|media-library/);
+  assert.match(mediaStorage, /type: 'video\/\*'[\s\S]*copyToCacheDirectory: false/);
+  assert.match(mediaStorage, /persistReadPermission\(asset\.uri\)/);
+});
+
+test('provider URIs stay in persistence and never cross the navigation URL', () => {
+  const projectsScreen = readFileSync(new URL('../src/app/index.tsx', import.meta.url), 'utf8');
+  const editorScreen = readFileSync(new URL('../src/app/editor.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(projectsScreen, /params:\s*\{[^}]*uri:/);
+  assert.doesNotMatch(editorScreen, /CaptionMedia|expo-document-picker|expo-image-picker/);
+  assert.match(projectsScreen, /params: \{ projectId: project\.id \}/);
+});
+
+test('caption trim grips remain available on both edges without covering adjacent blocks', () => {
+  const timeline = readFileSync(new URL('../src/components/editor/layer-timeline.tsx', import.meta.url), 'utf8');
+  assert.match(timeline, /<TimingGrip side="start" \{\.\.\.props\} \/>/);
+  assert.match(timeline, /<TimingGrip side="end" \{\.\.\.props\} \/>/);
+  const grip = timeline.slice(timeline.indexOf('function TimingGrip'));
+  assert.match(grip, /\[props\.side === 'start' \? 'left' : 'right'\]: 0/);
+  assert.doesNotMatch(grip, /\[props\.side === 'start' \? 'left' : 'right'\]: -/);
+});
+
+test('downloaded transcription models are pinned by SHA-256', () => {
+  const modelCatalog = readFileSync(new URL('../src/lib/model-catalog.ts', import.meta.url), 'utf8');
+  const transcription = readFileSync(new URL('../src/services/transcription.ts', import.meta.url), 'utf8');
+  assert.equal((modelCatalog.match(/sha256:/g) ?? []).length, 4);
+  assert.match(transcription, /CaptionMedia\.sha256/);
+  assert.match(transcription, /\.download/);
+});
+
+test('production builds cannot use the debug signing config', () => {
+  const appConfig = JSON.parse(readFileSync(new URL('../app.json', import.meta.url), 'utf8'));
+  const patchScript = readFileSync(new URL('../scripts/patch-react-native-gradle.js', import.meta.url), 'utf8');
+  const signingScript = readFileSync(new URL('../scripts/sign-android-release.js', import.meta.url), 'utf8');
+  assert.match(patchScript, /hasCaptionStudioReleaseSigning/);
+  assert.match(patchScript, /signingConfig signingConfigs\.release/);
+  assert.match(signingScript, /CAPTION_STUDIO_RELEASE_STORE_FILE/);
+  assert.match(signingScript, /migration \? \['--lineage'/);
+  assert.deepEqual(appConfig.expo.android.blockedPermissions.sort(), [
+    'android.permission.READ_EXTERNAL_STORAGE',
+    'android.permission.SYSTEM_ALERT_WINDOW',
+    'android.permission.WRITE_EXTERNAL_STORAGE',
+  ]);
+});
+
+test('clip timeline has no dead space between source segments', () => {
+  const timeline = buildClipTimeline([
+    { id: 'one', sourceStartMs: 5_000, sourceEndMs: 8_000 },
+    { id: 'two', sourceStartMs: 20_000, sourceEndMs: 22_500 },
+  ]);
+  assert.deepEqual(timeline.map(({ startMs, endMs }) => [startMs, endMs]), [[0, 3_000], [3_000, 5_500]]);
 });
 
 test('numeric camera filenames become human-readable project names', () => {

@@ -176,6 +176,9 @@ export type CaptionProject = {
   updatedAt: string;
   source: {
     uri: string;
+    storageMode?: 'linked' | 'copied';
+    sizeBytes?: number;
+    mimeType?: string;
     thumbnailUri?: string;
     displayName: string;
     durationMs: number;
