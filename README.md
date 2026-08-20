@@ -50,6 +50,8 @@ The first time `adb devices` runs, unlock the phone. Tap **Allow** on **Allow US
 ## What the current Android build includes
 
 - Android video import with source-orientation-aware preview
+- Persistent first-frame thumbnails in the editor and project list, with readable date/time names replacing UUIDs and camera-number filenames
+- A dedicated `com.hatsunama.captionstudio` Android identity so Caption Studio installs as its own app
 - On-device Whisper transcription through `whisper.rn`
 - Native Android audio decoding to PCM WAV without a cloud API
 - Presentation-timestamp-aware audio extraction plus on-device Silero voice-activity detection, so Whisper tokens inside opening or interior silence are rejected instead of becoming early captions

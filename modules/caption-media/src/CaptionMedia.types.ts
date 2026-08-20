@@ -15,3 +15,10 @@ export type AudioExtractionResult = {
   insertedSilenceMs: number;
   trimmedOverlapMs: number;
 };
+
+export type VideoThumbnailResult = {
+  outputUri: string;
+  width: number;
+  height: number;
+  timeMs: number;
+};

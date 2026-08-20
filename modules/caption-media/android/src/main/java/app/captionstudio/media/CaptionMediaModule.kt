@@ -1,6 +1,8 @@
 package app.captionstudio.media
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
@@ -11,6 +13,7 @@ import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
+import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -31,6 +34,65 @@ class CaptionMediaModule : Module() {
     AsyncFunction("extractAudioToWav") { inputUri: String, outputUri: String ->
       decodeAudioToWav(inputUri, outputUri)
     }
+
+    AsyncFunction("generateVideoThumbnail") { inputUri: String, outputUri: String, timeMs: Long ->
+      generateVideoThumbnail(inputUri, outputUri, timeMs)
+    }
+  }
+
+  private fun generateVideoThumbnail(input: String, output: String, timeMs: Long): Map<String, Any> {
+    val retriever = MediaMetadataRetriever()
+    var frame: Bitmap? = null
+    var orientedFrame: Bitmap? = null
+    return try {
+      setRetrieverDataSource(retriever, input)
+      val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+      val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+      val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+      val target = thumbnailSize(width, height)
+      frame = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1 && target.first > 0 && target.second > 0) {
+        retriever.getScaledFrameAtTime(
+          max(0L, timeMs) * 1_000L,
+          MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+          target.first,
+          target.second,
+        )
+      } else {
+        retriever.getFrameAtTime(max(0L, timeMs) * 1_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+      }
+      val decoded = frame ?: retriever.frameAtTime
+        ?: throw IllegalArgumentException("The first video frame could not be decoded")
+      orientedFrame = if (rotation % 360 == 0) {
+        decoded
+      } else {
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+        Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+      }
+
+      val outputFile = outputFile(output)
+      outputFile.parentFile?.mkdirs()
+      FileOutputStream(outputFile).use { stream ->
+        check(orientedFrame!!.compress(Bitmap.CompressFormat.JPEG, 88, stream)) {
+          "The first video frame could not be saved"
+        }
+      }
+      mapOf(
+        "outputUri" to output,
+        "width" to orientedFrame!!.width,
+        "height" to orientedFrame!!.height,
+        "timeMs" to max(0L, timeMs),
+      )
+    } finally {
+      if (orientedFrame !== frame) orientedFrame?.recycle()
+      frame?.recycle()
+      retriever.release()
+    }
+  }
+
+  private fun thumbnailSize(width: Int, height: Int): Pair<Int, Int> {
+    if (width <= 0 || height <= 0) return 0 to 0
+    val scale = minOf(1.0, 640.0 / max(width, height).toDouble())
+    return max(1, (width * scale).roundToInt()) to max(1, (height * scale).roundToInt())
   }
 
   private fun readMediaInfo(input: String): Map<String, Any> {

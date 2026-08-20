@@ -176,6 +176,7 @@ export type CaptionProject = {
   updatedAt: string;
   source: {
     uri: string;
+    thumbnailUri?: string;
     displayName: string;
     durationMs: number;
     width?: number;

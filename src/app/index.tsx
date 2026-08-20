@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import {
   ActivityIndicator,
   Alert,
@@ -11,8 +11,9 @@ import {
   View,
 } from 'react-native';
 
-import { listProjects } from '@/services/database';
-import { preserveImportedVideo } from '@/services/media-storage';
+import { humanVideoName } from '@/lib/project-presentation';
+import { listProjects, saveProject } from '@/services/database';
+import { ensureProjectThumbnail, preserveImportedVideo } from '@/services/media-storage';
 import type { CaptionProject } from '@/types/project';
 
 const palette = {
@@ -33,15 +34,36 @@ export default function ProjectsScreen() {
 
   const refresh = useCallback(async () => {
     try {
-      setProjects(await listProjects());
+      const storedProjects = await listProjects();
+      const preparedProjects: CaptionProject[] = [];
+      for (const stored of storedProjects) {
+        const name = humanVideoName(stored.name, stored.createdAt);
+        const thumbnailUri = await ensureProjectThumbnail({
+          projectId: stored.id,
+          videoUri: stored.source.uri,
+          thumbnailUri: stored.source.thumbnailUri,
+        });
+        if (name === stored.name && thumbnailUri === stored.source.thumbnailUri) {
+          preparedProjects.push(stored);
+          continue;
+        }
+        const prepared: CaptionProject = {
+          ...stored,
+          name,
+          source: { ...stored.source, displayName: name, thumbnailUri },
+        };
+        await saveProject(prepared);
+        preparedProjects.push(prepared);
+      }
+      setProjects(preparedProjects);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
+  useFocusEffect(useCallback(() => {
     void refresh();
-  }, [refresh]);
+  }, [refresh]));
 
   const importVideo = async () => {
     setImporting(true);
@@ -54,17 +76,20 @@ export default function ProjectsScreen() {
       if (result.canceled) return;
 
       const asset = result.assets[0];
-      const projectId = `project-${Date.now()}`;
-      const permanentUri = await preserveImportedVideo({
+      const importedAt = Date.now();
+      const projectId = `project-${importedAt}`;
+      const preserved = await preserveImportedVideo({
         projectId,
         sourceUri: asset.uri,
         fileName: asset.fileName,
       });
+      const projectName = humanVideoName(asset.fileName, importedAt);
       router.push({
         pathname: '/editor',
         params: {
-          uri: permanentUri,
-          name: asset.fileName ?? 'Untitled video',
+          uri: preserved.videoUri,
+          thumbnailUri: preserved.thumbnailUri ?? '',
+          name: projectName,
           durationMs: String(asset.duration ?? 0),
           projectId,
         },
@@ -189,11 +214,18 @@ export default function ProjectsScreen() {
             borderRadius: 18,
             backgroundColor: palette.surfaceRaised,
           }}>
-          <Image
-            source={{ uri: item.source.uri }}
-            style={{ width: 74, height: 74, borderRadius: 12, backgroundColor: '#050607' }}
-            contentFit="cover"
-          />
+          {item.source.thumbnailUri ? (
+            <Image
+              source={{ uri: item.source.thumbnailUri }}
+              style={{ width: 74, height: 74, borderRadius: 12, backgroundColor: '#050607' }}
+              contentFit="cover"
+              transition={160}
+            />
+          ) : (
+            <View style={{ width: 74, height: 74, borderRadius: 12, backgroundColor: '#050607', alignItems: 'center', justifyContent: 'center' }}>
+              <Text style={{ color: palette.muted, fontSize: 11, fontWeight: '800' }}>VIDEO</Text>
+            </View>
+          )}
           <View style={{ flex: 1, justifyContent: 'center', gap: 5 }}>
             <Text numberOfLines={1} style={{ color: palette.text, fontSize: 16, fontWeight: '700' }}>
               {item.name}

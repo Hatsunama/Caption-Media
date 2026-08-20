@@ -8,7 +8,7 @@
     "scheme": "captionstudio",
     "userInterfaceStyle": "dark",
     "android": {
-      "package": "app.captionstudio.mobile",
+      "package": "com.hatsunama.captionstudio",
       "adaptiveIcon": {
         "backgroundColor": "#090B0E",
         "foregroundImage": "./assets/images/android-icon-foreground.png",

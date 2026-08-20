@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useEventListener } from 'expo';
 import { Directory, File, Paths } from 'expo-file-system';
+import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -66,6 +67,7 @@ export default function EditorScreen() {
     projectId: string;
     uri: string;
     name: string;
+    thumbnailUri?: string;
     durationMs?: string;
   }>();
   const { height, width } = useWindowDimensions();
@@ -151,12 +153,13 @@ export default function EditorScreen() {
         setSelectedCaptionId(stored.captions[0]?.id);
         return;
       }
+      await saveProject(projectRef.current);
       try {
         const info = await CaptionMedia.getMediaInfo(params.uri);
         if (!active) return;
         setProject((current) => {
           const displaySize = orientedSize(info.width, info.height, info.rotation);
-          return {
+          const next = {
             ...current,
             source: {
               ...current.source,
@@ -174,6 +177,9 @@ export default function EditorScreen() {
                 ? [{ ...current.clips[0], sourceEndMs: info.durationMs }]
                 : current.clips,
           };
+          projectRef.current = next;
+          void saveProject(next);
+          return next;
         });
       } catch {
         // The preview remains usable even if metadata is unavailable.
@@ -700,6 +706,14 @@ export default function EditorScreen() {
               contentFit={project.videoTransform.fit === 'fill' ? 'cover' : 'contain'}
               surfaceType="textureView"
             />
+            {project.source.thumbnailUri && !player.playing && currentMs <= 50 ? (
+              <Image
+                pointerEvents="none"
+                source={{ uri: project.source.thumbnailUri }}
+                contentFit={project.videoTransform.fit === 'fill' ? 'cover' : 'contain'}
+                style={{ position: 'absolute', inset: 0 }}
+              />
+            ) : null}
           </View>
           {activeTool === 'video' ? (
             <VideoTransformOverlay
@@ -1000,7 +1014,7 @@ export default function EditorScreen() {
   );
 }
 
-function createProject(params: { projectId: string; uri: string; name: string; durationMs?: string }): CaptionProject {
+function createProject(params: { projectId: string; uri: string; name: string; thumbnailUri?: string; durationMs?: string }): CaptionProject {
   const now = new Date().toISOString();
   const durationMs = Number(params.durationMs ?? 0);
   return {
@@ -1011,6 +1025,7 @@ function createProject(params: { projectId: string; uri: string; name: string; d
     updatedAt: now,
     source: {
       uri: params.uri,
+      thumbnailUri: params.thumbnailUri || undefined,
       displayName: params.name,
       durationMs,
     },

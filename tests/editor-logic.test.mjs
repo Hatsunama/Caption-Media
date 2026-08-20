@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { spokenAnimationClock } from '../src/lib/animation-timing.ts';
@@ -7,6 +8,21 @@ import { groupWordsIntoCaptions } from '../src/lib/caption-grouping.ts';
 import { alignWordsToSpeech } from '../src/lib/speech-alignment.ts';
 import { packTimelineLanes } from '../src/lib/timeline-layout.ts';
 import { PREPARING_AUDIO_CUES } from '../src/lib/transcription-progress.ts';
+import { humanVideoName, isMachineVideoName } from '../src/lib/project-presentation.ts';
+
+test('Caption Studio has an isolated Android identity', () => {
+  const appConfig = JSON.parse(readFileSync(new URL('../app.json', import.meta.url), 'utf8'));
+  assert.equal(appConfig.expo.android.package, 'com.hatsunama.captionstudio');
+  assert.doesNotMatch(JSON.stringify(appConfig), /cuecam/i);
+});
+
+test('numeric camera filenames become human-readable project names', () => {
+  assert.equal(isMachineVideoName('6306.mp4'), true);
+  assert.equal(isMachineVideoName('VID_20260820_055214.mp4'), true);
+  assert.equal(isMachineVideoName('Snapchat-1207096082.mp4'), true);
+  assert.match(humanVideoName('6306.mp4', '2026-08-20T05:52:14-04:00'), /^Video · /);
+  assert.equal(humanVideoName('Birthday at the beach.mp4', '2026-08-20T05:52:14-04:00'), 'Birthday at the beach');
+});
 
 test('leading and interior silence never produce caption words', () => {
   const words = [
