@@ -88,6 +88,10 @@ export default function EditorScreen() {
   const [editingLayerId, setEditingLayerId] = useState<string>();
   const [activeTool, setActiveTool] = useState<EditorTool>('captions');
   const [animationScope, setAnimationScope] = useState<StyleScope>('all');
+  const undoStackRef = useRef<CaptionProject[]>([]);
+  const redoStackRef = useRef<CaptionProject[]>([]);
+  const interactionStartRef = useRef<CaptionProject | undefined>(undefined);
+  const [historyVersion, setHistoryVersion] = useState(0);
 
   const player = useVideoPlayer(params.uri, (instance) => {
     instance.timeUpdateEventInterval = 0.05;
@@ -201,6 +205,51 @@ export default function EditorScreen() {
     previewHeight - 8,
   );
 
+  const pushUndo = (snapshot = projectRef.current) => {
+    const stack = undoStackRef.current;
+    if (stack.at(-1) !== snapshot) stack.push(snapshot);
+    if (stack.length > 50) stack.shift();
+    redoStackRef.current = [];
+    setHistoryVersion((value) => value + 1);
+  };
+
+  const beginHistoryInteraction = () => {
+    interactionStartRef.current ??= projectRef.current;
+  };
+
+  const finishHistoryInteraction = () => {
+    const snapshot = interactionStartRef.current;
+    interactionStartRef.current = undefined;
+    if (snapshot && snapshot !== projectRef.current) pushUndo(snapshot);
+    void saveProject(projectRef.current);
+  };
+
+  const undo = () => {
+    const previous = undoStackRef.current.pop();
+    if (!previous) return;
+    redoStackRef.current.push(projectRef.current);
+    interactionStartRef.current = undefined;
+    projectRef.current = previous;
+    setProject(previous);
+    setSelectedCaptionId((id) => previous.captions.some((caption) => caption.id === id) ? id : previous.captions[0]?.id);
+    setSelectedLayerId((id) => previous.layers.some((layer) => layer.id === id) ? id : 'captions');
+    setHistoryVersion((value) => value + 1);
+    void saveProject(previous);
+  };
+
+  const redo = () => {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    undoStackRef.current.push(projectRef.current);
+    interactionStartRef.current = undefined;
+    projectRef.current = next;
+    setProject(next);
+    setSelectedCaptionId((id) => next.captions.some((caption) => caption.id === id) ? id : next.captions[0]?.id);
+    setSelectedLayerId((id) => next.layers.some((layer) => layer.id === id) ? id : 'captions');
+    setHistoryVersion((value) => value + 1);
+    void saveProject(next);
+  };
+
   const generateCaptions = async () => {
     setError(undefined);
     try {
@@ -223,6 +272,7 @@ export default function EditorScreen() {
         },
         captions: result.captions,
       };
+      pushUndo();
       setProject(next);
       setSelectedCaptionId(next.captions[0]?.id);
       await saveProject(next);
@@ -251,6 +301,7 @@ export default function EditorScreen() {
 
   const chooseStyleScope = async (scope: StyleScope) => {
     if (!pendingChange) return;
+    pushUndo();
     const next = applyStylePatch(
       projectRef.current,
       selectedCaptionId ?? '',
@@ -284,6 +335,7 @@ export default function EditorScreen() {
       return;
     }
     const scope = animationScope === 'caption' && selectedCaptionId ? 'caption' : 'all';
+    pushUndo();
     setProject((current) => {
       const next = applyStylePatch(current, selectedCaptionId ?? '', scope, {
         animation: { id, intensity: preset.intensity, durationMs: preset.durationMs },
@@ -302,6 +354,7 @@ export default function EditorScreen() {
 
   const commitCaptionText = async () => {
     if (editingText == null) return;
+    pushUndo();
     if (editingLayerId) {
       const next: CaptionProject = {
         ...projectRef.current,
@@ -334,6 +387,7 @@ export default function EditorScreen() {
   };
 
   const updateTextLayerStyle = (layerId: string, patch: CaptionStylePatch, persist = false) => {
+    if (persist) pushUndo();
     setProject((current) => {
       const next = {
         ...current,
@@ -358,10 +412,6 @@ export default function EditorScreen() {
       projectRef.current = next;
       return next;
     });
-  };
-
-  const persistProject = () => {
-    void saveProject(projectRef.current);
   };
 
   const updateVideoTransform = (patch: Partial<CaptionProject['videoTransform']>) => {
@@ -419,6 +469,7 @@ export default function EditorScreen() {
   };
 
   const addTextLayer = () => {
+    pushUndo();
     const id = uniqueId('text');
     const duration = Math.max(500, timelineDurationMs);
     const startMs = clamp(currentMs, 0, Math.max(0, duration - 500));
@@ -455,6 +506,7 @@ export default function EditorScreen() {
   const addImageLayer = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 1 });
     if (result.canceled) return;
+    pushUndo();
     const asset = result.assets[0];
     const id = uniqueId('image');
     const extension = asset.fileName?.match(/\.[a-z0-9]+$/i)?.[0] ?? '.jpg';
@@ -489,6 +541,7 @@ export default function EditorScreen() {
   };
 
   const moveLayer = (layerId: string, direction: -1 | 1) => {
+    pushUndo();
     setProject((current) => {
       const index = current.layers.findIndex((layer) => layer.id === layerId);
       const destination = index + direction;
@@ -504,6 +557,7 @@ export default function EditorScreen() {
 
   const deleteLayer = (layerId: string) => {
     if (layerId === 'captions') return;
+    pushUndo();
     setProject((current) => {
       const next = { ...current, updatedAt: new Date().toISOString(), layers: current.layers.filter((layer) => layer.id !== layerId) };
       projectRef.current = next;
@@ -518,6 +572,7 @@ export default function EditorScreen() {
     if (!entry) return;
     const sourceSplitMs = entry.clip.sourceStartMs + currentMs - entry.startMs;
     if (sourceSplitMs - entry.clip.sourceStartMs < 120 || entry.clip.sourceEndMs - sourceSplitMs < 120) return;
+    pushUndo();
     const left: VideoClip = { ...entry.clip, id: uniqueId('clip'), sourceEndMs: sourceSplitMs };
     const right: VideoClip = { ...entry.clip, id: uniqueId('clip'), sourceStartMs: sourceSplitMs };
     setProject((current) => {
@@ -537,6 +592,7 @@ export default function EditorScreen() {
     if (!selectedClipId || projectRef.current.clips.length <= 1) return;
     const entry = buildClipTimeline(projectRef.current.clips).find((item) => item.clip.id === selectedClipId);
     if (!entry) return;
+    pushUndo();
     const next = rippleDelete(projectRef.current, entry.startMs, entry.endMs, selectedClipId);
     projectRef.current = next;
     setProject(next);
@@ -551,6 +607,7 @@ export default function EditorScreen() {
     const current = projectRef.current;
     const entry = buildClipTimeline(current.clips).find((item) => item.clip.id === clipId);
     if (!entry) return;
+    pushUndo();
     const safeAmount = clamp(amountMs, 0, Math.max(0, entry.endMs - entry.startMs - 120));
     const cutStartMs = edge === 'start' ? entry.startMs : entry.endMs - safeAmount;
     const cutEndMs = edge === 'start' ? entry.startMs + safeAmount : entry.endMs;
@@ -577,6 +634,7 @@ export default function EditorScreen() {
     const current = projectRef.current;
     const index = current.captions.findIndex((caption) => caption.id === captionId);
     if (index < 0) return;
+    pushUndo();
     const captions = current.captions.filter((caption) => caption.id !== captionId);
     const next = {
       ...current,
@@ -597,6 +655,7 @@ export default function EditorScreen() {
   };
 
   const setCanvasPreset = async (preset: CaptionProject['canvas']['preset']) => {
+    pushUndo();
     const size = canvasPresetSize(preset, project);
     const next = {
       ...project,
@@ -645,8 +704,9 @@ export default function EditorScreen() {
           {activeTool === 'video' ? (
             <VideoTransformOverlay
               transform={project.videoTransform}
+              onInteractionStart={beginHistoryInteraction}
               onChange={updateVideoTransform}
-              onEnd={persistProject}
+              onEnd={finishHistoryInteraction}
             />
           ) : null}
           {[...project.layers].reverse().map((layer) => {
@@ -660,9 +720,9 @@ export default function EditorScreen() {
                   projectStyle={project.projectStyle}
                   currentMs={currentMs}
                   interactive={activeTool !== 'video' && selectedLayerId === 'captions' && Boolean(selectedCaptionId) && displayCaption?.id === selectedCaptionId}
-                  onInteractionStart={() => player.pause()}
+                  onInteractionStart={() => { player.pause(); beginHistoryInteraction(); }}
                   onTransform={updateCaptionTransform}
-                  onTransformEnd={persistProject}
+                  onTransformEnd={finishHistoryInteraction}
                   onDelete={selectedCaptionId ? () => confirmDeleteCaption(selectedCaptionId) : undefined}
                 />
               );
@@ -679,9 +739,9 @@ export default function EditorScreen() {
                   projectStyle={layer.style}
                   currentMs={currentMs}
                   interactive={activeTool !== 'video' && selectedLayerId === layer.id}
-                  onInteractionStart={() => player.pause()}
+                  onInteractionStart={() => { player.pause(); beginHistoryInteraction(); }}
                   onTransform={(patch) => updateTextLayerStyle(layer.id, patch)}
-                  onTransformEnd={persistProject}
+                  onTransformEnd={finishHistoryInteraction}
                   onDelete={() => deleteLayer(layer.id)}
                 />
               );
@@ -691,9 +751,9 @@ export default function EditorScreen() {
                 key={layer.id}
                 layer={layer}
                 interactive={activeTool !== 'video' && selectedLayerId === layer.id}
-                onInteractionStart={() => player.pause()}
+                onInteractionStart={() => { player.pause(); beginHistoryInteraction(); }}
                 onChange={(patch) => updateImageLayer(layer.id, patch)}
-                onEnd={persistProject}
+                onEnd={finishHistoryInteraction}
                 onDelete={() => deleteLayer(layer.id)}
               />
             );
@@ -726,6 +786,10 @@ export default function EditorScreen() {
       </View>
 
       <View style={{ flex: 1, gap: 12, paddingHorizontal: 12, paddingTop: 12 }}>
+        <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 10 }}>
+          <HistoryButton label="↶  Undo" disabled={undoStackRef.current.length === 0} version={historyVersion} onPress={undo} />
+          <HistoryButton label="Redo  ↷" disabled={redoStackRef.current.length === 0} version={historyVersion} onPress={redo} />
+        </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
           <View style={{ flex: 1 }}>
             <Text numberOfLines={1} style={{ color: palette.text, fontSize: 16, fontWeight: '700' }}>
@@ -788,7 +852,8 @@ export default function EditorScreen() {
           onTrimClip={trimClipEdge}
           onLayerTimingChange={updateLayerTiming}
           onCaptionTimingChange={updateCaptionTiming}
-          onTimingChangeEnd={persistProject}
+          onTimingChangeStart={beginHistoryInteraction}
+          onTimingChangeEnd={finishHistoryInteraction}
           onMoveLayer={moveLayer}
           onDeleteLayer={deleteLayer}
         />
@@ -799,16 +864,18 @@ export default function EditorScreen() {
               project={project}
               onCanvasPreset={setCanvasPreset}
               onFit={(fit) => {
+                beginHistoryInteraction();
                 updateVideoTransform({ fit });
-                queueMicrotask(persistProject);
+                queueMicrotask(finishHistoryInteraction);
               }}
-              onScale={(scale) => updateVideoTransform({ scale })}
-              onRotation={(rotation) => updateVideoTransform({ rotation })}
+              onScale={(scale) => { beginHistoryInteraction(); updateVideoTransform({ scale }); }}
+              onRotation={(rotation) => { beginHistoryInteraction(); updateVideoTransform({ rotation }); }}
               onReset={() => {
+                beginHistoryInteraction();
                 updateVideoTransform({ fit: 'fit', position: { x: 0.5, y: 0.5 }, scale: 1, rotation: 0 });
-                queueMicrotask(persistProject);
+                queueMicrotask(finishHistoryInteraction);
               }}
-              onTransformEnd={persistProject}
+              onTransformEnd={finishHistoryInteraction}
             />
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
               <Action label="Split video at playhead" onPress={splitClipAtPlayhead} />
@@ -867,8 +934,9 @@ export default function EditorScreen() {
             <Action
               label="Reset all caption boxes"
               onPress={() => {
+                beginHistoryInteraction();
                 updateCaptionTransform({ position: { x: 0.5, y: 0.78 }, box: { width: 0.86, height: 0.2 }, fontSize: 48, rotation: 0 });
-                queueMicrotask(persistProject);
+                queueMicrotask(finishHistoryInteraction);
               }}
             />
           </ScrollView>
@@ -997,6 +1065,19 @@ function Action(props: { label: string; color?: string; danger?: boolean; onPres
   );
 }
 
+function HistoryButton(props: { label: string; disabled: boolean; version: number; onPress: () => void }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={props.label.replace(/[↶↷]/g, '').trim()}
+      disabled={props.disabled}
+      onPress={props.onPress}
+      style={{ minWidth: 108, minHeight: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 14, borderWidth: 1, borderColor: props.disabled ? '#29313A' : '#6A42A8', backgroundColor: props.disabled ? '#171C22' : '#2B1C42', opacity: props.disabled ? 0.45 : 1 }}>
+      <Text style={{ color: props.disabled ? '#76818D' : '#DDBEFF', fontSize: 13, fontWeight: '900' }}>{props.label}</Text>
+    </Pressable>
+  );
+}
+
 function ToolbarItem(props: { label: string; active?: boolean; disabled?: boolean; onPress?: () => void }) {
   return (
     <Pressable
@@ -1071,6 +1152,7 @@ function stageTitle(stage: TranscriptionProgress['stage']) {
   switch (stage) {
     case 'preparing-audio': return 'Preparing audio';
     case 'downloading-model': return 'Getting offline model';
+    case 'detecting-speech': return 'Finding speech';
     case 'transcribing': return 'Generating captions';
     case 'grouping': return 'Building timeline';
   }

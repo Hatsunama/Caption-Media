@@ -3,16 +3,13 @@ plugins {
   id 'expo-module-gradle-plugin'
 }
 
-group = 'app.captionstudio.media'
-version = '0.1.0'
+group = 'app.captionstudio'
+version = '1.0.0'
 
 android {
-  namespace "app.captionstudio.media"
+  namespace 'app.captionstudio.media'
   defaultConfig {
     versionCode 1
-    versionName "0.1.0"
-  }
-  lintOptions {
-    abortOnError false
+    versionName '1.0.0'
   }
 }

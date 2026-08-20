@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 
 import { reactionEmojis } from '@/lib/animation-presets';
+import { spokenAnimationClock } from '@/lib/animation-timing';
 import { resolveCaptionStyle } from '@/lib/style-resolver';
 import type { CaptionAnimationId, CaptionBlock, CaptionStyle, CaptionStylePatch, WordToken } from '@/types/project';
 
@@ -132,9 +133,17 @@ export function CaptionOverlay(props: {
   const renderedWords = wordsMatchCaption(timedWords, caption.text) ? timedWords : fallbackWords(caption);
   const activeIndex = renderedWords.findIndex((word) => props.currentMs >= word.startMs && props.currentMs < word.endMs);
   const visibleWords = wordsForAnimation(renderedWords, activeIndex, style.animation.id);
-  const elapsed = Math.max(0, props.currentMs - caption.startMs);
-  const entryProgress = clamp(elapsed / Math.max(1, style.animation.durationMs), 0, 1);
-  const loopProgress = (elapsed % Math.max(1, style.animation.durationMs)) / Math.max(1, style.animation.durationMs);
+  const activeWord = renderedWords[activeIndex];
+  // Every effect restarts on the word's real speech window instead of looping
+  // independently of the voice track.
+  const { entryProgress, wordProgress } = spokenAnimationClock({
+    currentMs: props.currentMs,
+    captionStartMs: caption.startMs,
+    captionEndMs: caption.endMs,
+    animationDurationMs: style.animation.durationMs,
+    activeWord,
+  });
+  const loopProgress = wordProgress;
   const fittedFontSize = fitCaptionFont(style, renderedWords, canvasLayout);
   const backgroundAlpha = Math.round(style.background.opacity * 255).toString(16).padStart(2, '0');
   const transformed = (text: string) => {
@@ -226,7 +235,7 @@ export function CaptionOverlay(props: {
           {style.animation.id.startsWith('emoji-') ? (
             <EmojiEffects
               mode={style.animation.id}
-              emojis={reactionEmojis(renderedWords[activeIndex]?.text ?? caption.text)}
+              emojis={reactionEmojis(activeWord?.text ?? '', caption.text)}
               progress={loopProgress}
             />
           ) : null}
@@ -234,11 +243,11 @@ export function CaptionOverlay(props: {
 
         {props.interactive ? (
           <>
-            <ResizeBar axis="width" side={-1} styleRef={styleRef} canvas={canvas} onChange={props.onTransform} onEnd={props.onTransformEnd} />
-            <ResizeBar axis="width" side={1} styleRef={styleRef} canvas={canvas} onChange={props.onTransform} onEnd={props.onTransformEnd} />
-            <ResizeBar axis="height" side={-1} styleRef={styleRef} canvas={canvas} onChange={props.onTransform} onEnd={props.onTransformEnd} />
-            <ResizeBar axis="height" side={1} styleRef={styleRef} canvas={canvas} onChange={props.onTransform} onEnd={props.onTransformEnd} />
-            <RotateScaleHandle styleRef={styleRef} canvas={canvas} onChange={props.onTransform} onEnd={props.onTransformEnd} />
+            <ResizeBar axis="width" side={-1} styleRef={styleRef} canvas={canvas} onStart={props.onInteractionStart} onChange={props.onTransform} onEnd={props.onTransformEnd} />
+            <ResizeBar axis="width" side={1} styleRef={styleRef} canvas={canvas} onStart={props.onInteractionStart} onChange={props.onTransform} onEnd={props.onTransformEnd} />
+            <ResizeBar axis="height" side={-1} styleRef={styleRef} canvas={canvas} onStart={props.onInteractionStart} onChange={props.onTransform} onEnd={props.onTransformEnd} />
+            <ResizeBar axis="height" side={1} styleRef={styleRef} canvas={canvas} onStart={props.onInteractionStart} onChange={props.onTransform} onEnd={props.onTransformEnd} />
+            <RotateScaleHandle styleRef={styleRef} canvas={canvas} onStart={props.onInteractionStart} onChange={props.onTransform} onEnd={props.onTransformEnd} />
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Delete this subtitle"
@@ -362,9 +371,9 @@ function fitCaptionFont(style: CaptionStyle, words: WordToken[], canvas: { width
   const maxLines = Math.max(1, style.maxLines);
   const text = words.map((word) => word.text).join(' ');
   const longestWord = Math.max(1, ...words.map((word) => word.text.length));
-  const targetCharactersPerLine = Math.max(longestWord, Math.ceil(text.length / maxLines));
-  const widthCap = availableWidth / Math.max(1, targetCharactersPerLine * 0.57);
-  const longestWordCap = availableWidth / Math.max(1, longestWord * 0.64);
+  const targetCharactersPerLine = Math.max(longestWord, Math.ceil((text.length + words.length * 0.8) / maxLines));
+  const widthCap = availableWidth / Math.max(1, targetCharactersPerLine * 0.68);
+  const longestWordCap = availableWidth / Math.max(1, longestWord * 0.72);
   const heightCap = availableHeight / Math.max(1, maxLines * Math.max(1, style.lineHeight));
   return clamp(Math.min(style.fontSize, widthCap, longestWordCap, heightCap), 9, style.fontSize);
 }
@@ -455,6 +464,7 @@ function ResizeBar(props: {
   side: -1 | 1;
   styleRef: React.RefObject<CaptionStyle>;
   canvas: React.RefObject<CanvasMetrics>;
+  onStart?: () => void;
   onChange?: (patch: CaptionStylePatch) => void;
   onEnd?: () => void;
 }) {
@@ -473,6 +483,7 @@ function ResizeBar(props: {
         onMoveShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponderCapture: () => true,
         onPanResponderGrant: () => {
+          propsRef.current.onStart?.();
           const style = propsRef.current.styleRef.current;
           start.current = {
             box: { ...style.box },
@@ -551,6 +562,7 @@ function ResizeBar(props: {
 function RotateScaleHandle(props: {
   styleRef: React.RefObject<CaptionStyle>;
   canvas: React.RefObject<CanvasMetrics>;
+  onStart?: () => void;
   onChange?: (patch: CaptionStylePatch) => void;
   onEnd?: () => void;
 }) {
@@ -571,6 +583,7 @@ function RotateScaleHandle(props: {
         onMoveShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponderCapture: () => true,
         onPanResponderGrant: (event) => {
+          propsRef.current.onStart?.();
           const style = propsRef.current.styleRef.current;
           const size = propsRef.current.canvas.current;
           const point = firstTouch(event);

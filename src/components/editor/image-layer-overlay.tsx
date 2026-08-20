@@ -118,7 +118,7 @@ export function ImageLayerOverlay(props: {
               style={{ position: 'absolute', left: -20, top: -20, width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20, backgroundColor: '#FF5267' }}>
               <Text style={{ color: '#FFF', fontSize: 22, fontWeight: '900' }}>×</Text>
             </Pressable>
-            <ImageCornerHandle layer={props.layer} canvas={canvas} onChange={props.onChange} onEnd={props.onEnd} />
+            <ImageCornerHandle layer={props.layer} canvas={canvas} onStart={props.onInteractionStart} onChange={props.onChange} onEnd={props.onEnd} />
           </>
         ) : null}
       </View>
@@ -129,6 +129,7 @@ export function ImageLayerOverlay(props: {
 function ImageCornerHandle(props: {
   layer: ImageVisualLayer;
   canvas: React.RefObject<{ width: number; height: number }>;
+  onStart?: () => void;
   onChange: (patch: Partial<ImageVisualLayer>) => void;
   onEnd: () => void;
 }) {
@@ -140,6 +141,7 @@ function ImageCornerHandle(props: {
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: () => {
+        propsRef.current.onStart?.();
         start.current = { box: { ...propsRef.current.layer.box }, rotation: propsRef.current.layer.rotation };
       },
       onPanResponderMove: (_event, gesture) => {

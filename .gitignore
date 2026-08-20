@@ -49,6 +49,13 @@ yarn-error.*
 *.wav
 *.bin
 research-private/
+/test-media/
+/.gh*/
+/.gp*/
+/.gradle-*/
+/gradle-stack.txt
+/picker.png
+/seeker-*.png
 
 # generated native folders
 /ios

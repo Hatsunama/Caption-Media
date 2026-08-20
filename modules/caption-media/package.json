@@ -1,0 +1,11 @@
+{
+  "name": "caption-media",
+  "version": "1.0.0",
+  "description": "Local Android media decoding for Caption Studio",
+  "main": "src/CaptionMediaModule.ts",
+  "types": "src/CaptionMediaModule.ts",
+  "private": true,
+  "peerDependencies": {
+    "expo": "*"
+  }
+}

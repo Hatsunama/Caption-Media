@@ -1,14 +1,17 @@
 import { Directory, File, Paths } from 'expo-file-system';
-import { initWhisper } from 'whisper.rn/index';
+import { initWhisper, initWhisperVad } from 'whisper.rn/index';
 
 import CaptionMedia from '../../modules/caption-media/src/CaptionMediaModule';
 import { groupWordsIntoCaptions } from '@/lib/caption-grouping';
 import { getModel, type TranscriptionModel } from '@/lib/model-catalog';
+import { alignWordsToSpeech } from '@/lib/speech-alignment';
+import { PREPARING_AUDIO_CUES } from '@/lib/transcription-progress';
 import type { CaptionBlock, WordToken } from '@/types/project';
 
 export type TranscriptionStage =
   | 'preparing-audio'
   | 'downloading-model'
+  | 'detecting-speech'
   | 'transcribing'
   | 'grouping';
 
@@ -23,6 +26,12 @@ export type LocalTranscriptionResult = {
   words: WordToken[];
   captions: CaptionBlock[];
   audioUri: string;
+};
+
+const VAD_MODEL = {
+  fileName: 'ggml-silero-v6.2.0.bin',
+  downloadBytes: 885_098,
+  downloadUrl: 'https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin',
 };
 
 export async function ensureModel(
@@ -59,6 +68,28 @@ export async function ensureModel(
   return modelFile;
 }
 
+async function ensureVadModel(onProgress?: (progress: TranscriptionProgress) => void): Promise<File> {
+  const modelDirectory = new Directory(Paths.document, 'models');
+  modelDirectory.create({ idempotent: true, intermediates: true });
+  const modelFile = new File(modelDirectory, VAD_MODEL.fileName);
+  if (modelFile.exists && modelFile.size === VAD_MODEL.downloadBytes) return modelFile;
+
+  onProgress?.({
+    stage: 'downloading-model',
+    progress: 0,
+    detail: 'Downloading the small offline silence detector once',
+  });
+  await File.downloadFileAsync(VAD_MODEL.downloadUrl, modelFile, {
+    idempotent: true,
+    onProgress: ({ bytesWritten, totalBytes }) => onProgress?.({
+      stage: 'downloading-model',
+      progress: Math.min(1, bytesWritten / Math.max(1, totalBytes || VAD_MODEL.downloadBytes)),
+      detail: 'Downloading offline silence detector',
+    }),
+  });
+  return modelFile;
+}
+
 export async function transcribeVideoLocally(options: {
   projectId: string;
   videoUri: string;
@@ -83,18 +114,18 @@ export async function transcribeVideoLocally(options: {
       if (audioPreparationFinished) return;
       onProgress?.({
         stage: 'preparing-audio',
-        progress: 0.05,
+        progress: PREPARING_AUDIO_CUES[0].progress,
         detail: 'Extracting audio on this phone',
       });
-    }, 3_000),
+    }, PREPARING_AUDIO_CUES[0].afterMs),
     setTimeout(() => {
       if (audioPreparationFinished) return;
       onProgress?.({
         stage: 'preparing-audio',
-        progress: 0.1,
+        progress: PREPARING_AUDIO_CUES[1].progress,
         detail: 'Still preparing audio — longer videos can take a minute',
       });
-    }, 6_000),
+    }, PREPARING_AUDIO_CUES[1].afterMs),
   ];
 
   try {
@@ -109,7 +140,41 @@ export async function transcribeVideoLocally(options: {
     detail: 'Audio ready',
   });
 
-  const modelFile = await ensureModel(modelId, onProgress);
+  const [modelFile, vadModelFile] = await Promise.all([
+    ensureModel(modelId, onProgress),
+    ensureVadModel(onProgress),
+  ]);
+  onProgress?.({
+    stage: 'detecting-speech',
+    progress: 0,
+    detail: 'Finding spoken sections and ignoring silence',
+  });
+  const vadContext = await initWhisperVad({
+    filePath: vadModelFile.uri,
+    useGpu: false,
+    nThreads: 4,
+  });
+  let speechSegments: { t0: number; t1: number }[];
+  try {
+    speechSegments = await vadContext.detectSpeech(audioFile.uri, {
+      threshold: 0.42,
+      minSpeechDurationMs: 180,
+      minSilenceDurationMs: 280,
+      maxSpeechDurationS: 29,
+      speechPadMs: 90,
+      samplesOverlap: 0.1,
+    });
+  } finally {
+    await vadContext.release();
+  }
+  if (speechSegments.length === 0) {
+    throw new Error('No speech was detected in this video. Try a clip with clearer spoken audio.');
+  }
+  onProgress?.({
+    stage: 'detecting-speech',
+    progress: 1,
+    detail: `Found ${speechSegments.length} spoken section${speechSegments.length === 1 ? '' : 's'}`,
+  });
   const context = await initWhisper({
     filePath: modelFile.uri,
     useGpu: false,
@@ -132,7 +197,10 @@ export async function transcribeVideoLocally(options: {
     const result = await promise;
     if (result.isAborted) throw new Error('Transcription was cancelled');
 
-    const words = normalizeWordSegments(result.segments);
+    const words = alignWordsToSpeech(normalizeWordSegments(result.segments), speechSegments);
+    if (words.length === 0) {
+      throw new Error('Speech was detected, but no reliable words were found. Try the Balanced model or clearer audio.');
+    }
     onProgress?.({
       stage: 'grouping',
       progress: 0.5,

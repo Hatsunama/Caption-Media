@@ -8,6 +8,7 @@ type VideoTransform = CaptionProject['videoTransform'];
 
 export function VideoTransformOverlay(props: {
   transform: VideoTransform;
+  onInteractionStart?: () => void;
   onChange: (patch: Partial<VideoTransform>) => void;
   onEnd: () => void;
 }) {
@@ -39,7 +40,10 @@ export function VideoTransformOverlay(props: {
       PanResponder.create({
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
-        onPanResponderGrant: (event) => rebase(readTouches(event)),
+        onPanResponderGrant: (event) => {
+          propsRef.current.onInteractionStart?.();
+          rebase(readTouches(event));
+        },
         onPanResponderMove: (event) => {
           const touches = readTouches(event);
           if (touches.length === 0) return;
