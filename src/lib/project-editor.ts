@@ -1,4 +1,5 @@
 import { mergeStyle } from '@/lib/style-resolver';
+import { applyCaptionTextChanges, type CaptionTextChanges } from '@/lib/caption-text-edits';
 import { buildClipTimeline, rippleTimedContent, sourceTimeAt } from '@/lib/video-timeline';
 import {
   DEFAULT_CAPTION_STYLE,
@@ -9,10 +10,9 @@ import {
   type VideoClip,
 } from '@/types/project';
 
-export function setCaptionText(project: CaptionProject, captionId: string, text: string) {
-  return updateProject(project, {
-    captions: project.captions.map((caption) => caption.id === captionId ? { ...caption, text: text.trim() } : caption),
-  });
+export function setCaptionTexts(project: CaptionProject, changes: CaptionTextChanges) {
+  const captions = applyCaptionTextChanges(project.captions, changes);
+  return captions === project.captions ? project : updateProject(project, { captions });
 }
 
 export function setTextLayerText(project: CaptionProject, layerId: string, text: string) {

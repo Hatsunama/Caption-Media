@@ -2,7 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanResponder, Pressable, ScrollView, Text, View } from 'react-native';
 
 import { packTimelineLanes } from '@/lib/timeline-layout';
-import { clampTimelineScale, minimumTimelineScale, timelineTickInterval, timelineWidth, timelineZoomPercent } from '@/lib/timeline-scale';
+import {
+  clampTimelineScale,
+  minimumTimelineScale,
+  timelineScrollOffset,
+  timelineTickInterval,
+  timelineTimeAtScroll,
+  timelineWidth,
+  timelineZoomPercent,
+} from '@/lib/timeline-scale';
 import { buildClipTimeline } from '@/lib/video-timeline';
 import type { CaptionBlock, VideoClip, VisualLayer } from '@/types/project';
 
@@ -17,11 +25,11 @@ export function LayerTimeline(props: {
   layers: VisualLayer[];
   captions: CaptionBlock[];
   currentMs: number;
-  isPlaying: boolean;
   selectedLayerId: string;
   selectedCaptionId?: string;
   selectedClipId?: string;
   onSeek: (timeMs: number) => void;
+  onScrubStart: () => void;
   onSelectLayer: (id: string) => void;
   onSelectCaption: (caption: CaptionBlock) => void;
   onSelectClip: (clipId: string, timelineStartMs: number) => void;
@@ -44,6 +52,10 @@ export function LayerTimeline(props: {
   const zoomPercent = timelineZoomPercent(effectiveScale, minimumScale);
   const [zoomNotice, setZoomNotice] = useState<number>();
   const zoomTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrubEndTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrubbingRef = useRef(false);
+  const scrollXRef = useRef(0);
+  const lastScrubMsRef = useRef(-1);
   const pinch = useRef({ distance: 0, scale: effectiveScale });
   const captionLayout = useMemo(() => packTimelineLanes(props.captions), [props.captions]);
   const captionRowHeight = captionLayout.laneCount * LANE_HEIGHT + 10;
@@ -52,19 +64,34 @@ export function LayerTimeline(props: {
     0,
   );
   const clipPositions = useMemo(() => buildClipTimeline(props.clips), [props.clips]);
+  const leadingPadding = Math.max(0, viewportWidth / 2 - LABEL_WIDTH);
+  const trailingPadding = viewportWidth / 2;
+  const scrollContentWidth = leadingPadding + LABEL_WIDTH + trackWidth + trailingPadding;
 
   useEffect(() => () => {
     if (zoomTimer.current) clearTimeout(zoomTimer.current);
+    if (scrubEndTimer.current) clearTimeout(scrubEndTimer.current);
   }, []);
 
   useEffect(() => {
-    if (!props.isPlaying) return;
-    const playhead = LABEL_WIDTH + currentX(props.currentMs, duration, trackWidth);
-    horizontalRef.current?.scrollTo({
-      x: clamp(playhead - viewportWidth / 2, 0, Math.max(0, LABEL_WIDTH + trackWidth - viewportWidth)),
-      animated: false,
-    });
-  }, [duration, props.currentMs, props.isPlaying, trackWidth, viewportWidth]);
+    if (scrubbingRef.current) return;
+    const x = timelineScrollOffset(props.currentMs, duration, trackWidth);
+    scrollXRef.current = x;
+    horizontalRef.current?.scrollTo({ x, animated: false });
+  }, [duration, props.currentMs, trackWidth, viewportWidth]);
+
+  const seekFromScroll = (offset: number, force = false) => {
+    const timeMs = timelineTimeAtScroll(offset, duration, trackWidth);
+    if (!force && Math.abs(timeMs - lastScrubMsRef.current) < 32) return;
+    lastScrubMsRef.current = timeMs;
+    props.onSeek(timeMs);
+  };
+
+  const finishScrub = () => {
+    if (scrubEndTimer.current) clearTimeout(scrubEndTimer.current);
+    scrubbingRef.current = false;
+    seekFromScroll(scrollXRef.current, true);
+  };
 
   const updateZoom = (next: number) => {
     const clamped = clampTimelineScale(next, minimumScale);
@@ -94,8 +121,34 @@ export function LayerTimeline(props: {
         <Text style={{ minWidth: 118, color: '#D7DDE5', textAlign: 'center', fontSize: 11, fontWeight: '800' }}>TIMELINE {zoomPercent}%</Text>
         <ZoomButton label="+" onPress={() => updateZoom(effectiveScale * 1.5)} />
       </View>
-      <ScrollView ref={horizontalRef} horizontal nestedScrollEnabled showsHorizontalScrollIndicator contentContainerStyle={{ width: LABEL_WIDTH + trackWidth }}>
-        <View style={{ width: LABEL_WIDTH + trackWidth, height: '100%' }}>
+      <ScrollView
+        ref={horizontalRef}
+        horizontal
+        nestedScrollEnabled
+        decelerationRate="fast"
+        scrollEventThrottle={32}
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ width: scrollContentWidth }}
+        onScrollBeginDrag={() => {
+          if (scrubEndTimer.current) clearTimeout(scrubEndTimer.current);
+          scrubbingRef.current = true;
+          props.onScrubStart();
+        }}
+        onScroll={(event) => {
+          const x = clamp(event.nativeEvent.contentOffset.x, 0, trackWidth);
+          scrollXRef.current = x;
+          if (scrubbingRef.current) seekFromScroll(x);
+        }}
+        onScrollEndDrag={() => {
+          if (scrubEndTimer.current) clearTimeout(scrubEndTimer.current);
+          scrubEndTimer.current = setTimeout(finishScrub, 90);
+        }}
+        onMomentumScrollBegin={() => {
+          if (scrubEndTimer.current) clearTimeout(scrubEndTimer.current);
+          scrubbingRef.current = true;
+        }}
+        onMomentumScrollEnd={finishScrub}>
+        <View style={{ width: LABEL_WIDTH + trackWidth, height: '100%', marginLeft: leadingPadding }}>
           <TimelineRuler durationMs={duration} trackWidth={trackWidth} pixelsPerSecond={effectiveScale} />
           <ScrollView style={{ marginTop: RULER_HEIGHT }} contentContainerStyle={{ paddingVertical: 1 }} nestedScrollEnabled>
             <TimelineRow label="VIDEO" labelColor="#DFFF35" selected={Boolean(props.selectedClipId)} trackWidth={trackWidth} height={46} onPressTrack={(x) => props.onSeek(x / trackWidth * duration)} controls={<Text style={{ color: '#6F7985', fontSize: 8 }}>{props.clips.length} CLIP{props.clips.length === 1 ? '' : 'S'}</Text>}>
@@ -132,9 +185,11 @@ export function LayerTimeline(props: {
               );
             })}
           </ScrollView>
-          <View pointerEvents="none" style={{ position: 'absolute', left: LABEL_WIDTH + currentX(props.currentMs, duration, trackWidth), top: RULER_HEIGHT, bottom: 0, width: 2, backgroundColor: '#FF5267' }} />
         </View>
       </ScrollView>
+      <View pointerEvents="none" style={{ position: 'absolute', left: '50%', top: 36, bottom: 0, width: 2, marginLeft: -1, backgroundColor: '#FF5267' }}>
+        <View style={{ position: 'absolute', left: -7, top: 0, width: 0, height: 0, borderLeftWidth: 8, borderRightWidth: 8, borderTopWidth: 11, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#FF5267' }} />
+      </View>
       <Pressable accessibilityRole="button" accessibilityLabel="Add videos to the end of the timeline" onPress={props.onAddVideos} style={{ position: 'absolute', right: 10, top: RULER_HEIGHT + 45, width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20, borderWidth: 2, borderColor: '#11140C', backgroundColor: '#DFFF35' }}>
         <Text style={{ color: '#11140C', fontSize: 27, fontWeight: '700', lineHeight: 30 }}>+</Text>
       </Pressable>
@@ -184,5 +239,4 @@ function TinyButton(props: { label: string; danger?: boolean; disabled?: boolean
 function ZoomButton(props: { label: string; onPress: () => void }) { return <Pressable accessibilityRole="button" accessibilityLabel={props.label === '+' ? 'Zoom timeline in' : 'Zoom timeline out'} onPress={props.onPress} style={{ width: 42, height: 28, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: '#242B34' }}><Text style={{ color: '#DFFF35', fontSize: 20, fontWeight: '900' }}>{props.label}</Text></Pressable>; }
 function formatRulerTime(ms: number, intervalMs: number) { const minutes = Math.floor(ms / 60_000); const seconds = (ms % 60_000) / 1000; return intervalMs < 1000 ? `${minutes}:${seconds.toFixed(intervalMs < 500 ? 2 : 1).padStart(4, '0')}` : `${minutes}:${Math.floor(seconds).toString().padStart(2, '0')}`; }
 function touchDistance(first?: { pageX: number; pageY: number }, second?: { pageX: number; pageY: number }) { if (!first || !second) return 0; return Math.hypot(first.pageX - second.pageX, first.pageY - second.pageY); }
-function currentX(currentMs: number, durationMs: number, width: number) { return clamp(currentMs / Math.max(1, durationMs), 0, 1) * width; }
 function clamp(value: number, min: number, max: number) { return Math.min(max, Math.max(min, value)); }

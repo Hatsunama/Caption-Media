@@ -23,6 +23,7 @@ import { ImageLayerOverlay } from '@/components/editor/image-layer-overlay';
 import { LayerTimeline } from '@/components/editor/layer-timeline';
 import { MediaLoadingOverlay } from '@/components/media-loading-overlay';
 import { ScopeSheet } from '@/components/editor/scope-sheet';
+import { ScriptEditor } from '@/components/editor/script-editor';
 import { VideoTools } from '@/components/editor/video-tools';
 import { VideoTransformOverlay } from '@/components/editor/video-transform-overlay';
 import { findAnimationPreset } from '@/lib/animation-presets';
@@ -34,7 +35,7 @@ import {
   deleteVisualLayer,
   moveVisualLayer,
   setCanvasPreset as applyCanvasPreset,
-  setCaptionText,
+  setCaptionTexts,
   setCaptionTiming,
   setImageLayer,
   setLayerTiming,
@@ -139,8 +140,8 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
   const [fontBrowserOpen, setFontBrowserOpen] = useState(false);
   const [pendingChange, setPendingChange] = useState<PendingStyleChange>();
   const [editingText, setEditingText] = useState<string>();
-  const [editingCaptionId, setEditingCaptionId] = useState<string>();
   const [editingLayerId, setEditingLayerId] = useState<string>();
+  const [scriptEditorOpen, setScriptEditorOpen] = useState(false);
   const [activeTool, setActiveTool] = useState<EditorTool>('captions');
   const [animationScope, setAnimationScope] = useState<StyleScope>('all');
   const undoStackRef = useRef<CaptionProject[]>([]);
@@ -433,29 +434,31 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
 
   const beginEditCaption = () => {
     if (!selectedCaption) return;
-    setEditingCaptionId(selectedCaption.id);
-    setEditingText(selectedCaption.text);
+    player.pause();
+    setScriptEditorOpen(true);
   };
 
-  const commitCaptionText = async () => {
-    if (editingText == null) return;
+  const commitTextLayerText = async () => {
+    if (editingText == null || !editingLayerId) return;
     pushUndo();
-    if (editingLayerId) {
-      const next = setTextLayerText(projectRef.current, editingLayerId, editingText);
-      projectRef.current = next;
-      setProject(next);
-      setEditingLayerId(undefined);
-      setEditingText(undefined);
-      await persistProject(next);
-      return;
-    }
-    if (!editingCaptionId) return;
-    const next = setCaptionText(projectRef.current, editingCaptionId, editingText);
+    const next = setTextLayerText(projectRef.current, editingLayerId, editingText);
     projectRef.current = next;
     setProject(next);
-    setEditingCaptionId(undefined);
+    setEditingLayerId(undefined);
     setEditingText(undefined);
     await persistProject(next);
+  };
+
+  const commitCaptionScript = async (changes: Readonly<Record<string, string>>) => {
+    const before = projectRef.current;
+    const next = setCaptionTexts(before, changes);
+    if (next !== before) {
+      pushUndo(before);
+      projectRef.current = next;
+      setProject(next);
+      await persistProject(next);
+    }
+    setScriptEditorOpen(false);
   };
 
   const updateTextLayerStyle = (layerId: string, patch: CaptionStylePatch, persist = false) => {
@@ -830,7 +833,12 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
         </View>
       </View>
 
-      <View style={{ flex: 1, gap: 12, paddingHorizontal: 12, paddingTop: 12 }}>
+      <View style={{ flex: 1 }}>
+        <ScrollView
+          nestedScrollEnabled
+          keyboardShouldPersistTaps="handled"
+          style={{ flex: 1 }}
+          contentContainerStyle={{ gap: 12, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 18 }}>
         <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 10 }}>
           <HistoryButton label="↶  Undo" disabled={undoStackRef.current.length === 0} version={historyVersion} onPress={undo} />
           <HistoryButton label="Redo  ↷" disabled={redoStackRef.current.length === 0} version={historyVersion} onPress={redo} />
@@ -877,8 +885,8 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
           selectedCaptionId={selectedCaptionId}
           selectedClipId={selectedClipId}
           currentMs={currentMs}
-          isPlaying={isPlaying}
           onSeek={seekTimeline}
+          onScrubStart={() => player.pause()}
           onSelectLayer={(layerId) => {
             player.pause();
             setSelectedLayerId(layerId);
@@ -982,7 +990,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
           </ScrollView>
         ) : selectedCaption ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
-            <Action label="Edit text" onPress={beginEditCaption} />
+            <Action label="Edit captions" onPress={beginEditCaption} />
             <Action label="Delete subtitle" danger onPress={() => confirmDeleteCaption(selectedCaption.id)} />
             <Action label="Add text layer" onPress={addTextLayer} />
             <Action label="Add sticker/image" onPress={() => void addImageLayer()} />
@@ -1027,11 +1035,13 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
           </View>
         ) : null}
 
+        </ScrollView>
+
         <View
           style={{
-            marginTop: 'auto',
             flexDirection: 'row',
             gap: 6,
+            paddingHorizontal: 12,
             paddingVertical: 10,
             paddingBottom: 14,
             borderTopWidth: 1,
@@ -1057,16 +1067,30 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
         onClose={() => setFontBrowserOpen(false)}
         onSelect={chooseFont}
       />
-      <EditCaptionModal
-        visible={Boolean(editingCaptionId || editingLayerId)}
+      <ScriptEditor
+        visible={scriptEditorOpen}
+        captions={project.captions}
+        initialCaptionId={selectedCaptionId ?? activeCaption?.id}
+        onSelectCaption={(caption) => {
+          player.pause();
+          setSelectedLayerId('captions');
+          setSelectedCaptionId(caption.id);
+          setSelectedClipId(undefined);
+          setActiveTool('captions');
+          seekTimeline(caption.startMs);
+        }}
+        onCancel={() => setScriptEditorOpen(false)}
+        onSave={commitCaptionScript}
+      />
+      <EditTextLayerModal
+        visible={Boolean(editingLayerId)}
         value={editingText ?? ''}
         onChange={setEditingText}
         onCancel={() => {
-          setEditingCaptionId(undefined);
           setEditingLayerId(undefined);
           setEditingText(undefined);
         }}
-        onSave={commitCaptionText}
+        onSave={commitTextLayerText}
       />
       <ProgressOverlay progress={progress} />
       <MediaLoadingOverlay progress={mediaProgress} />
@@ -1147,7 +1171,7 @@ function ProgressOverlay(props: { progress?: TranscriptionProgress }) {
   );
 }
 
-function EditCaptionModal(props: {
+function EditTextLayerModal(props: {
   visible: boolean;
   value: string;
   onChange: (value: string) => void;
@@ -1158,7 +1182,7 @@ function EditCaptionModal(props: {
     <Modal visible={props.visible} transparent animationType="fade" onRequestClose={props.onCancel}>
       <View style={{ flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'rgba(0,0,0,0.72)' }}>
         <View style={{ gap: 14, padding: 20, borderRadius: 22, backgroundColor: '#181D24' }}>
-          <Text style={{ color: palette.text, fontSize: 20, fontWeight: '800' }}>Edit subtitle</Text>
+          <Text style={{ color: palette.text, fontSize: 20, fontWeight: '800' }}>Edit text layer</Text>
           <TextInput
             autoFocus
             multiline

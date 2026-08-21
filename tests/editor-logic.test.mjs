@@ -7,9 +7,10 @@ import { reactionEmojis } from '../src/lib/animation-presets.ts';
 import { groupWordsIntoCaptions } from '../src/lib/caption-grouping.ts';
 import { alignWordsToSpeech } from '../src/lib/speech-alignment.ts';
 import { packTimelineLanes } from '../src/lib/timeline-layout.ts';
-import { minimumTimelineScale, timelineTickInterval, timelineWidth } from '../src/lib/timeline-scale.ts';
+import { minimumTimelineScale, timelineScrollOffset, timelineTickInterval, timelineTimeAtScroll, timelineWidth } from '../src/lib/timeline-scale.ts';
 import { PREPARING_AUDIO_CUES } from '../src/lib/transcription-progress.ts';
 import { humanVideoName, isMachineVideoName } from '../src/lib/project-presentation.ts';
+import { applyCaptionTextChanges } from '../src/lib/caption-text-edits.ts';
 import { buildClipTimeline, clipPlaybackVolume, mapSourceWordsToTimeline } from '../src/lib/video-timeline.ts';
 
 test('Caption Studio has an isolated Android identity', () => {
@@ -184,12 +185,54 @@ test('screens delegate project mutations to domain and workflow layers', () => {
   assert.match(projects, /deleteProjectCompletely/);
 });
 
-test('timeline follows playback, renders a ruler, and offers an append-video control', () => {
+test('fixed-center timeline scrolling maps exactly to the video playhead', () => {
+  assert.equal(timelineScrollOffset(0, 200_000, 1_000), 0);
+  assert.equal(timelineScrollOffset(100_000, 200_000, 1_000), 500);
+  assert.equal(timelineTimeAtScroll(750, 200_000, 1_000), 150_000);
+  assert.equal(timelineTimeAtScroll(2_000, 200_000, 1_000), 200_000);
+});
+
+test('script caption edits commit atomically and preserve caption invariants', () => {
+  const captions = [
+    { id: 'first', text: 'Original first' },
+    { id: 'second', text: 'Original second' },
+  ];
+  const next = applyCaptionTextChanges(captions, {
+    first: '  Revised first  ',
+    second: 'Revised second',
+    missing: 'Ignored',
+  });
+  assert.notEqual(next, captions);
+  assert.deepEqual(next.map((caption) => caption.text), ['Revised first', 'Revised second']);
+  assert.equal(applyCaptionTextChanges(next, { first: 'Revised first' }), next);
+  assert.equal(applyCaptionTextChanges(next, { first: '   ' }), next);
+});
+
+test('caption editing opens the full timestamped script and keeps text-layer editing isolated', () => {
+  const editor = readFileSync(new URL('../src/app/editor.tsx', import.meta.url), 'utf8');
+  const scriptEditor = readFileSync(new URL('../src/components/editor/script-editor.tsx', import.meta.url), 'utf8');
+  assert.match(editor, /<ScriptEditor/);
+  assert.match(editor, /setCaptionTexts\(before, changes\)/);
+  assert.match(editor, /<EditTextLayerModal/);
+  assert.match(scriptEditor, /<FlatList/);
+  assert.match(scriptEditor, /formatTimestamp\(item\.startMs\)/);
+  assert.match(scriptEditor, /Tap any line to edit it/);
+  assert.match(scriptEditor, /onSave\(drafts\)/);
+});
+
+test('timeline keeps a fixed playhead, scrubs its content, renders a ruler, and offers an append-video control', () => {
   const timeline = readFileSync(new URL('../src/components/editor/layer-timeline.tsx', import.meta.url), 'utf8');
-  assert.match(timeline, /if \(!props\.isPlaying\) return/);
-  assert.match(timeline, /playhead - viewportWidth \/ 2/);
+  assert.match(timeline, /timelineTimeAtScroll\(offset, duration, trackWidth\)/);
+  assert.match(timeline, /left: '50%'/);
+  assert.match(timeline, /onScrollBeginDrag/);
   assert.match(timeline, /TimelineRuler/);
   assert.match(timeline, /onAddVideos/);
+});
+
+test('the editor tool panel scrolls independently above a fixed mode bar', () => {
+  const editor = readFileSync(new URL('../src/app/editor.tsx', import.meta.url), 'utf8');
+  assert.match(editor, /nestedScrollEnabled[\s\S]*contentContainerStyle=\{\{ gap: 12/);
+  assert.match(editor, /<VideoTools[\s\S]*<\/ScrollView>[\s\S]*<ToolbarItem label="Captions"/);
 });
 
 test('animation progress follows the active spoken word', () => {
