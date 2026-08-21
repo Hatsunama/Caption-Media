@@ -1,41 +1,32 @@
-import { DEFAULT_CAPTION_STYLE, type CaptionProject } from '@/types/project';
+import { DEFAULT_CAPTION_STYLE, type CaptionProject, type ProjectVideoSource } from '@/types/project';
 
 export function createCaptionProject(options: {
   id: string;
   name: string;
-  source: {
-    uri: string;
-    storageMode: 'linked' | 'copied';
-    thumbnailUri?: string;
-    sizeBytes?: number;
-    mimeType?: string;
-    durationMs: number;
-    width: number;
-    height: number;
-    rotation: number;
-  };
+  sources: ProjectVideoSource[];
 }): CaptionProject {
+  if (options.sources.length === 0) throw new Error('A project requires at least one video source.');
   const now = new Date().toISOString();
-  const displaySize = orientedSize(options.source.width, options.source.height, options.source.rotation);
+  const primary = options.sources[0];
+  const displaySize = orientedSize(primary.width, primary.height, primary.rotation);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: options.id,
     name: options.name,
     createdAt: now,
     updatedAt: now,
-    source: {
-      ...options.source,
-      displayName: options.name,
-    },
+    lifecycle: { status: 'draft' },
+    sources: options.sources,
     transcription: {
       language: 'en',
       modelId: 'fast',
       words: [],
+      sourceResults: {},
     },
     captions: [],
     projectStyle: DEFAULT_CAPTION_STYLE,
     layers: [{ id: 'captions', kind: 'captions', name: 'Captions', visible: true }],
-    clips: [{ id: 'source-clip', sourceStartMs: 0, sourceEndMs: options.source.durationMs }],
+    clips: options.sources.map((source, index) => createVideoClip(source, index)),
     canvas: {
       preset: 'source',
       aspectWidth: displaySize.width,
@@ -48,12 +39,25 @@ export function createCaptionProject(options: {
       scale: 1,
       rotation: 0,
     },
-    videoEdits: [],
     export: {
       resolution: '1080p',
       format: 'mp4',
       burnCaptions: true,
     },
+  };
+}
+
+export function createVideoClip(source: ProjectVideoSource, index = 0) {
+  return {
+    id: `clip-${source.id}-${index}`,
+    sourceId: source.id,
+    sourceStartMs: 0,
+    sourceEndMs: source.durationMs,
+    playbackRate: 1,
+    volume: 1,
+    muted: false,
+    fadeInMs: 0,
+    fadeOutMs: 0,
   };
 }
 

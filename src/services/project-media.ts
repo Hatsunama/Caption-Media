@@ -4,6 +4,7 @@ import CaptionMedia from '../../modules/caption-media/src/CaptionMediaModule';
 
 export async function ensureProjectThumbnail(options: {
   projectId: string;
+  sourceId: string;
   videoUri: string;
   thumbnailUri?: string;
 }): Promise<string | undefined> {
@@ -11,12 +12,12 @@ export async function ensureProjectThumbnail(options: {
     const existing = await FileSystem.getInfoAsync(options.thumbnailUri);
     if (existing.exists && !existing.isDirectory) return options.thumbnailUri;
   }
-  return generateProjectThumbnail(options.projectId, options.videoUri);
+  return generateProjectThumbnail(options.projectId, options.sourceId, options.videoUri);
 }
 
-export async function generateProjectThumbnail(projectId: string, videoUri: string) {
+export async function generateProjectThumbnail(projectId: string, sourceId: string, videoUri: string) {
   if (!FileSystem.documentDirectory) return undefined;
-  const outputUri = `${FileSystem.documentDirectory}projects/${projectId}/first-frame.jpg`;
+  const outputUri = `${FileSystem.documentDirectory}projects/${projectId}/source-${safePathSegment(sourceId)}.jpg`;
   try {
     await CaptionMedia.generateVideoThumbnail(videoUri, outputUri, 0);
     const generated = await FileSystem.getInfoAsync(outputUri);
@@ -26,9 +27,40 @@ export async function generateProjectThumbnail(projectId: string, videoUri: stri
   }
 }
 
+export async function deleteProjectFiles(projectId: string) {
+  if (!FileSystem.documentDirectory) return;
+  const projectUri = `${FileSystem.documentDirectory}projects/${safePathSegment(projectId)}/`;
+  const info = await FileSystem.getInfoAsync(projectUri);
+  if (info.exists) await FileSystem.deleteAsync(projectUri, { idempotent: true });
+}
+
+export async function deleteProjectOwnedFiles(projectId: string, uris: string[]) {
+  if (!FileSystem.documentDirectory) return;
+  const projectUri = `${FileSystem.documentDirectory}projects/${safePathSegment(projectId)}/`;
+  for (const uri of uris) {
+    if (!uri.startsWith(projectUri)) continue;
+    const info = await FileSystem.getInfoAsync(uri);
+    if (info.exists && !info.isDirectory) await FileSystem.deleteAsync(uri, { idempotent: true });
+  }
+}
+
 export async function validateProjectSource(videoUri: string) {
   const info = await CaptionMedia.getMediaInfo(videoUri);
   if (info.durationMs <= 0) throw new Error('The source is not a readable video.');
+}
+
+export async function validateProjectSources(sources: { uri: string; displayName: string }[]) {
+  for (const source of sources) {
+    try {
+      await validateProjectSource(source.uri);
+    } catch (error) {
+      throw new Error(`${source.displayName}: ${error instanceof Error ? error.message : 'The source is unavailable.'}`);
+    }
+  }
+}
+
+function safePathSegment(value: string) {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
 export async function storeProjectImage(options: {

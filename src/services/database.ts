@@ -1,9 +1,10 @@
 import * as SQLite from 'expo-sqlite';
 
-import { DEFAULT_CAPTION_STYLE, type CaptionProject } from '@/types/project';
+import { DEFAULT_CAPTION_STYLE, type CaptionProject, type ProjectVideoSource, type VideoClip } from '@/types/project';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | undefined;
 const projectWriteQueues = new Map<string, Promise<void>>();
+const deletedProjectIds = new Set<string>();
 
 export async function getDatabase() {
   databasePromise ??= SQLite.openDatabaseAsync('caption-studio.db');
@@ -33,6 +34,7 @@ export async function getDatabase() {
 }
 
 export async function saveProject(project: CaptionProject) {
+  if (deletedProjectIds.has(project.id)) throw new Error('This project has been deleted.');
   const snapshot = JSON.stringify(project);
   const previous = projectWriteQueues.get(project.id) ?? Promise.resolve();
   const operation = previous.catch(() => undefined).then(async () => {
@@ -47,7 +49,7 @@ export async function saveProject(project: CaptionProject) {
          project_json = excluded.project_json`,
       project.id,
       project.name,
-      project.source.uri,
+      project.sources[0]?.uri ?? '',
       project.updatedAt,
       snapshot,
     );
@@ -57,6 +59,18 @@ export async function saveProject(project: CaptionProject) {
     await operation;
   } finally {
     if (projectWriteQueues.get(project.id) === operation) projectWriteQueues.delete(project.id);
+  }
+}
+
+export async function deleteProjectRecord(projectId: string) {
+  deletedProjectIds.add(projectId);
+  await projectWriteQueues.get(projectId)?.catch(() => undefined);
+  try {
+    const database = await getDatabase();
+    await database.runAsync('DELETE FROM projects WHERE id = ?', projectId);
+  } catch (error) {
+    deletedProjectIds.delete(projectId);
+    throw error;
   }
 }
 
@@ -89,19 +103,19 @@ export async function getProject(projectId: string): Promise<CaptionProject | nu
 function parseProject(value: string): CaptionProject {
   const parsed: unknown = JSON.parse(value);
   if (!parsed || typeof parsed !== 'object') throw new Error('Project data is not an object');
-  const candidate = parsed as Partial<CaptionProject>;
+  const candidate = parsed as Record<string, unknown>;
+  if (candidate.schemaVersion === 1) return migrateVersionOne(candidate);
+  if (candidate.schemaVersion !== 2) throw new Error('Project data uses an unsupported version');
   if (
-    candidate.schemaVersion !== 1
-    || typeof candidate.id !== 'string'
+    typeof candidate.id !== 'string'
     || typeof candidate.name !== 'string'
-    || !candidate.source
-    || typeof candidate.source.uri !== 'string'
+    || !Array.isArray(candidate.sources)
+    || candidate.sources.length === 0
+    || !Array.isArray(candidate.clips)
     || !Array.isArray(candidate.captions)
     || !candidate.transcription
-  ) {
-    throw new Error('Project data is incomplete or from an unsupported version');
-  }
-  return candidate as CaptionProject;
+  ) throw new Error('Project data is incomplete');
+  return candidate as unknown as CaptionProject;
 }
 
 function hydrateProject(project: CaptionProject): CaptionProject {
@@ -113,9 +127,18 @@ function hydrateProject(project: CaptionProject): CaptionProject {
   };
   return {
     ...project,
-    source: {
-      ...project.source,
-      storageMode: project.source.storageMode ?? (project.source.uri.startsWith('content:') ? 'linked' : 'copied'),
+    schemaVersion: 2,
+    lifecycle: project.lifecycle ?? { status: 'saved' },
+    sources: project.sources.map((source) => ({
+      ...source,
+      storageMode: source.storageMode ?? (source.uri.startsWith('content:') ? 'linked' : 'copied'),
+      width: Math.max(1, source.width ?? 1),
+      height: Math.max(1, source.height ?? 1),
+      rotation: source.rotation ?? 0,
+    })),
+    transcription: {
+      ...project.transcription,
+      sourceResults: project.transcription.sourceResults ?? {},
     },
     projectStyle: hydratedProjectStyle,
     layers: (project.layers ?? [{ id: 'captions', kind: 'captions', name: 'Captions', visible: true }]).map((layer) =>
@@ -131,13 +154,11 @@ function hydrateProject(project: CaptionProject): CaptionProject {
           }
         : layer,
     ),
-    clips: project.clips?.length
-      ? project.clips
-      : [{ id: 'source-clip', sourceStartMs: 0, sourceEndMs: project.source.durationMs }],
+    clips: project.clips.map(hydrateClip),
     canvas: project.canvas ?? {
       preset: 'source',
-      aspectWidth: project.source.width ?? 9,
-      aspectHeight: project.source.height ?? 16,
+      aspectWidth: project.sources[0]?.width ?? 9,
+      aspectHeight: project.sources[0]?.height ?? 16,
       backgroundColor: '#000000',
     },
     videoTransform: project.videoTransform ?? {
@@ -147,4 +168,58 @@ function hydrateProject(project: CaptionProject): CaptionProject {
       rotation: 0,
     },
   };
+}
+
+function hydrateClip(clip: VideoClip): VideoClip {
+  return {
+    ...clip,
+    playbackRate: clip.playbackRate ?? 1,
+    volume: clip.volume ?? 1,
+    muted: clip.muted ?? false,
+    fadeInMs: clip.fadeInMs ?? 0,
+    fadeOutMs: clip.fadeOutMs ?? 0,
+  };
+}
+
+function migrateVersionOne(candidate: Record<string, unknown>): CaptionProject {
+  const legacy = candidate as {
+    id?: unknown;
+    name?: unknown;
+    source?: Partial<ProjectVideoSource>;
+    clips?: Partial<VideoClip>[];
+    transcription?: CaptionProject['transcription'];
+  } & Record<string, unknown>;
+  if (
+    typeof legacy.id !== 'string'
+    || typeof legacy.name !== 'string'
+    || typeof legacy.source?.uri !== 'string'
+    || typeof legacy.source.durationMs !== 'number'
+    || !legacy.transcription
+  ) throw new Error('Legacy project data is incomplete');
+  const sourceId = 'source-1';
+  const source: ProjectVideoSource = {
+    id: sourceId,
+    uri: legacy.source.uri,
+    storageMode: legacy.source.storageMode ?? (legacy.source.uri.startsWith('content:') ? 'linked' : 'copied'),
+    sizeBytes: legacy.source.sizeBytes,
+    mimeType: legacy.source.mimeType,
+    thumbnailUri: legacy.source.thumbnailUri,
+    displayName: legacy.source.displayName ?? legacy.name,
+    durationMs: legacy.source.durationMs,
+    width: Math.max(1, legacy.source.width ?? 1),
+    height: Math.max(1, legacy.source.height ?? 1),
+    rotation: legacy.source.rotation ?? 0,
+  };
+  const migrated: Record<string, unknown> = {
+    ...candidate,
+    schemaVersion: 2,
+    lifecycle: { status: 'saved' },
+    sources: [source],
+    clips: (legacy.clips?.length ? legacy.clips : [{ id: 'source-clip', sourceStartMs: 0, sourceEndMs: source.durationMs }])
+      .map((clip) => hydrateClip({ ...clip, id: String(clip.id), sourceId } as VideoClip)),
+    transcription: { ...legacy.transcription, sourceResults: {} },
+  };
+  delete migrated.source;
+  delete migrated.videoEdits;
+  return migrated as unknown as CaptionProject;
 }

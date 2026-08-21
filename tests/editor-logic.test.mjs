@@ -7,9 +7,10 @@ import { reactionEmojis } from '../src/lib/animation-presets.ts';
 import { groupWordsIntoCaptions } from '../src/lib/caption-grouping.ts';
 import { alignWordsToSpeech } from '../src/lib/speech-alignment.ts';
 import { packTimelineLanes } from '../src/lib/timeline-layout.ts';
+import { minimumTimelineScale, timelineTickInterval, timelineWidth } from '../src/lib/timeline-scale.ts';
 import { PREPARING_AUDIO_CUES } from '../src/lib/transcription-progress.ts';
 import { humanVideoName, isMachineVideoName } from '../src/lib/project-presentation.ts';
-import { buildClipTimeline } from '../src/lib/video-timeline.ts';
+import { buildClipTimeline, clipPlaybackVolume, mapSourceWordsToTimeline } from '../src/lib/video-timeline.ts';
 
 test('Caption Studio has an isolated Android identity', () => {
   const appConfig = JSON.parse(readFileSync(new URL('../app.json', import.meta.url), 'utf8'));
@@ -25,6 +26,7 @@ test('video acquisition links the selected source without a hidden picker copy',
   assert.equal(packageJson.dependencies['expo-media-library'], undefined);
   assert.doesNotMatch(JSON.stringify(appConfig.expo.plugins), /image-picker|media-library/);
   assert.match(mediaStorage, /type: 'video\/\*'[\s\S]*copyToCacheDirectory: false/);
+  assert.match(mediaStorage, /multiple: true/);
   assert.match(mediaStorage, /persistReadPermission\(asset\.uri\)/);
 });
 
@@ -70,8 +72,8 @@ test('production builds cannot use the debug signing config', () => {
 
 test('clip timeline has no dead space between source segments', () => {
   const timeline = buildClipTimeline([
-    { id: 'one', sourceStartMs: 5_000, sourceEndMs: 8_000 },
-    { id: 'two', sourceStartMs: 20_000, sourceEndMs: 22_500 },
+    clip({ id: 'one', sourceStartMs: 5_000, sourceEndMs: 8_000 }),
+    clip({ id: 'two', sourceStartMs: 20_000, sourceEndMs: 22_500 }),
   ]);
   assert.deepEqual(timeline.map(({ startMs, endMs }) => [startMs, endMs]), [[0, 3_000], [3_000, 5_500]]);
 });
@@ -131,9 +133,63 @@ test('generated caption blocks remain chronological and never overlap', () => {
   assert.equal(captions[0].startMs, 4_000);
 });
 
-test('preparing progress moves to 5%, then waits 20 seconds for 10%', () => {
-  assert.deepEqual(PREPARING_AUDIO_CUES.map((cue) => cue.progress), [0.05, 0.1]);
-  assert.equal(PREPARING_AUDIO_CUES[1].afterMs - PREPARING_AUDIO_CUES[0].afterMs, 20_000);
+test('preparing progress advances one percent every 22 seconds from 5% through 10%', () => {
+  assert.deepEqual(PREPARING_AUDIO_CUES.map((cue) => cue.progress), [0.05, 0.06, 0.07, 0.08, 0.09, 0.1]);
+  assert.deepEqual(PREPARING_AUDIO_CUES.slice(1).map((cue, index) => cue.afterMs - PREPARING_AUDIO_CUES[index].afterMs), [22_000, 22_000, 22_000, 22_000, 22_000]);
+});
+
+test('multi-source words are projected into the speed-aware ripple timeline', () => {
+  const words = mapSourceWordsToTimeline([
+    clip({ id: 'a', sourceId: 'first', sourceStartMs: 1_000, sourceEndMs: 3_000, playbackRate: 2 }),
+    clip({ id: 'b', sourceId: 'second', sourceStartMs: 0, sourceEndMs: 2_000 }),
+  ], {
+    first: [{ id: 'one', text: 'fast', startMs: 1_500, endMs: 2_000 }],
+    second: [{ id: 'two', text: 'next', startMs: 500, endMs: 1_000 }],
+  });
+  assert.deepEqual(words.map((word) => [word.text, word.startMs, word.endMs]), [
+    ['fast', 250, 500],
+    ['next', 1_500, 2_000],
+  ]);
+});
+
+test('timeline zoom reaches a whole-project view and exposes fractional ruler ticks', () => {
+  const minimum = minimumTimelineScale(10 * 60_000, 300);
+  assert.equal(minimum, 0.5);
+  assert.equal(timelineWidth(10 * 60_000, minimum, 300), 300);
+  assert.equal(timelineTickInterval(240), 250);
+});
+
+test('clip audio fades are resolved by timeline position', () => {
+  const fading = clip({ sourceEndMs: 4_000, volume: 0.8, fadeInMs: 1_000, fadeOutMs: 1_000 });
+  assert.equal(clipPlaybackVolume(fading, 0), 0);
+  assert.equal(clipPlaybackVolume(fading, 500), 0.4);
+  assert.equal(clipPlaybackVolume(fading, 2_000), 0.8);
+  assert.equal(clipPlaybackVolume(fading, 4_000), 0);
+});
+
+test('editor back navigation is an explicit save-or-discard transaction', () => {
+  const editor = readFileSync(new URL('../src/app/editor.tsx', import.meta.url), 'utf8');
+  assert.match(editor, /addListener\('beforeRemove'/);
+  assert.match(editor, /saveEditorDraft\(projectRef\.current\)/);
+  assert.match(editor, /discardEditorSession\(initialProject, projectRef\.current\)/);
+});
+
+test('screens delegate project mutations to domain and workflow layers', () => {
+  const editor = readFileSync(new URL('../src/app/editor.tsx', import.meta.url), 'utf8');
+  const projects = readFileSync(new URL('../src/app/index.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(editor, /updatedAt:\s*new Date/);
+  assert.doesNotMatch(editor, /DocumentPicker|CaptionMedia|SQLite|FileSystem|services\/database/);
+  assert.doesNotMatch(projects, /DocumentPicker|CaptionMedia|SQLite|FileSystem|services\/database/);
+  assert.match(editor, /from '@\/lib\/project-editor'/);
+  assert.match(projects, /deleteProjectCompletely/);
+});
+
+test('timeline follows playback, renders a ruler, and offers an append-video control', () => {
+  const timeline = readFileSync(new URL('../src/components/editor/layer-timeline.tsx', import.meta.url), 'utf8');
+  assert.match(timeline, /if \(!props\.isPlaying\) return/);
+  assert.match(timeline, /playhead - viewportWidth \/ 2/);
+  assert.match(timeline, /TimelineRuler/);
+  assert.match(timeline, /onAddVideos/);
 });
 
 test('animation progress follows the active spoken word', () => {
@@ -149,3 +205,18 @@ test('emoji reactions change with the spoken word', () => {
   assert.deepEqual(reactionEmojis('camera'), ['🎥', '📸', '🎬', '📱']);
   assert.notDeepEqual(reactionEmojis('money'), reactionEmojis('sad'));
 });
+
+function clip(overrides = {}) {
+  return {
+    id: 'clip',
+    sourceId: 'source',
+    sourceStartMs: 0,
+    sourceEndMs: 1_000,
+    playbackRate: 1,
+    volume: 1,
+    muted: false,
+    fadeInMs: 0,
+    fadeOutMs: 0,
+    ...overrides,
+  };
+}

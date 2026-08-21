@@ -49,18 +49,21 @@ The first time `adb devices` runs, unlock the phone. Tap **Allow** on **Allow US
 
 ## What the current Android build includes
 
-- Storage-efficient Android video import that keeps a durable link to the selected source instead of duplicating the full video into app cache
+- Multi-select Android video import that accepts any number of clips while keeping durable source links instead of duplicating full videos into app cache
+- A visible loading dialog immediately after the system picker accepts the videos
 - Source-orientation-aware preview
 - Persistent first-frame thumbnails in the editor and project list, with readable date/time names replacing UUIDs and camera-number filenames
 - A dedicated `com.hatsunama.captionstudio` Android identity so Caption Studio installs as its own app
 - On-device Whisper transcription through `whisper.rn`
 - Native Android audio decoding to PCM WAV without a cloud API
 - Presentation-timestamp-aware audio extraction plus on-device Silero voice-activity detection, so Whisper tokens inside opening or interior silence are rejected instead of becoming early captions
-- Responsive preparation feedback at 5% after 3 seconds and 10% after 23 seconds (an exact 20-second interval) while long videos are being decoded
+- Responsive preparation feedback that reaches 5% after 3 seconds, advances from 6% through 10% in 22-second steps, then follows real decoding progress
 - Safe **Generate again** control for replacing caption text/timing while preserving the project style and added layers
 - Downloadable Fast, Balanced, and Accurate Whisper model tiers
 - Caption grouping from word timestamps
-- A layered, magnetic timeline with a fixed video track plus reorderable caption, added-text, and image/sticker tracks
+- A layered, magnetic timeline with multiple source-aware video clips plus reorderable caption, added-text, and image/sticker tracks
+- Automatic playhead-follow scrolling, fractional-second ruler markings, pinch/buttons for much wider zoom ranges, and a visible zoom percentage
+- A floating timeline add button for appending one or many videos to the end
 - Neon pink/blue/green subtitle blocks that stay end-to-end on one lane; genuine overlaps automatically move to additional visible lanes so no subtitle can hide underneath another
 - Always-visible left and right timing grips: drag either edge directly, even before selecting the subtitle, while the block body remains available for timeline scrolling
 - Clear **Undo** and **Redo** controls directly below the video for timeline, transform, style, layer, and video-edit changes
@@ -74,7 +77,9 @@ The first time `adb devices` runs, unlock the phone. Tap **Allow** on **Allow US
 - Source, 9:16, 16:9, 1:1, and 4:5 canvases
 - Fit and Fill framing for making a wide clip fill a TikTok canvas
 - Direct video drag, pinch-to-resize, two-finger rotation, size buttons, 90-degree rotation, and a precise free-angle scrubber
-- Nondestructive video split, clip deletion, and edge trimming with magnetic ripple updates to timed captions and visual layers
+- Nondestructive video split, clip deletion, edge trimming, speed, volume, mute, and audio fades with magnetic ripple updates to timed captions and visual layers
+- An explicit Save draft / Discard / Keep editing decision whenever the user backs out of the editor
+- Confirmed project deletion from a trash control on every project card; linked source videos are never deleted
 - Local SQLite project snapshots
 
 Styled MP4/SRT/ASS export remains pre-release work. Video cuts are currently represented and previewed nondestructively in the project timeline; final rendered-video export is not yet available. Production APKs use the dedicated Caption Studio release identity described below. The source video is never rewritten by editing operations.

@@ -165,24 +165,18 @@ export async function transcribeVideoLocally(options: {
   });
 
   let audioPreparationFinished = false;
-  const preparationCueTimers = [
+  const preparationCueTimers = PREPARING_AUDIO_CUES.map((cue) =>
     setTimeout(() => {
       if (audioPreparationFinished) return;
       onProgress?.({
         stage: 'preparing-audio',
-        progress: PREPARING_AUDIO_CUES[0].progress,
-        detail: 'Extracting audio on this phone',
+        progress: cue.progress,
+        detail: cue.progress === 0.05
+          ? 'Extracting audio on this phone'
+          : 'Still preparing audio — longer videos can take a few minutes',
       });
-    }, PREPARING_AUDIO_CUES[0].afterMs),
-    setTimeout(() => {
-      if (audioPreparationFinished) return;
-      onProgress?.({
-        stage: 'preparing-audio',
-        progress: PREPARING_AUDIO_CUES[1].progress,
-        detail: 'Still preparing audio — longer videos can take a minute',
-      });
-    }, PREPARING_AUDIO_CUES[1].afterMs),
-  ];
+    }, cue.afterMs),
+  );
 
   try {
     await CaptionMedia.extractAudioToWav(videoUri, audioFile.uri);

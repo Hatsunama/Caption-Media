@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { NavigationAction } from '@react-navigation/native';
 import { useEventListener } from 'expo';
 import { Image } from 'expo-image';
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useNavigation } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import {
   ActivityIndicator,
@@ -20,33 +21,57 @@ import { CaptionOverlay } from '@/components/editor/caption-overlay';
 import { FontBrowser } from '@/components/editor/font-browser';
 import { ImageLayerOverlay } from '@/components/editor/image-layer-overlay';
 import { LayerTimeline } from '@/components/editor/layer-timeline';
+import { MediaLoadingOverlay } from '@/components/media-loading-overlay';
 import { ScopeSheet } from '@/components/editor/scope-sheet';
 import { VideoTools } from '@/components/editor/video-tools';
 import { VideoTransformOverlay } from '@/components/editor/video-transform-overlay';
 import { findAnimationPreset } from '@/lib/animation-presets';
 import { fontChoicePatch, type FontChoice } from '@/lib/font-catalog';
-import { applyStylePatch, mergeStyle, resolveCaptionStyle, type StyleScope } from '@/lib/style-resolver';
+import {
+  addImageLayer as addImageLayerToProject,
+  createTextLayer,
+  deleteCaptionBlock,
+  deleteVisualLayer,
+  moveVisualLayer,
+  setCanvasPreset as applyCanvasPreset,
+  setCaptionText,
+  setCaptionTiming,
+  setImageLayer,
+  setLayerTiming,
+  setTextLayerStyle,
+  setTextLayerText,
+  setVideoTransform,
+  splitVideoClip,
+  trimVideoClip,
+  updateVideoClip,
+} from '@/lib/project-editor';
+import { applyStylePatch, resolveCaptionStyle, type StyleScope } from '@/lib/style-resolver';
 import {
   buildClipTimeline,
+  clipPlaybackVolume,
   rippleDelete,
-  rippleTimedContent,
+  setClipPlaybackRate,
+  sourceTimeAt,
   timelineEntryAt,
+  timelineTimeAt,
   totalClipDuration,
 } from '@/lib/video-timeline';
-import { getProject, saveProject } from '@/services/database';
-import { pickAndStoreImage } from '@/services/media-import';
-import { validateProjectSource } from '@/services/project-media';
+import { pickAndStoreImage, type MediaImportProgress } from '@/services/media-import';
+import { validateProjectSources } from '@/services/project-media';
 import {
-  transcribeVideoLocally,
-  type TranscriptionProgress,
-} from '@/services/transcription';
+  appendVideosToProject,
+  checkpointEditorProject,
+  discardEditorSession,
+  generateAndSaveProjectCaptions,
+  loadProjectForEditing,
+  saveEditorDraft,
+} from '@/services/project-workflows';
+import type { TranscriptionProgress } from '@/services/transcription';
 import {
-  DEFAULT_CAPTION_STYLE,
   type CaptionAnimationId,
   type CaptionProject,
   type CaptionStylePatch,
   type ImageVisualLayer,
-  type TextVisualLayer,
   type VideoClip,
 } from '@/types/project';
 
@@ -74,7 +99,7 @@ export default function EditorScreen() {
 
   useEffect(() => {
     let active = true;
-    void getProject(projectId)
+    void loadProjectForEditing(projectId)
       .then((stored) => {
         if (!active) return;
         if (!stored) throw new Error('This project no longer exists on this device.');
@@ -96,6 +121,7 @@ export default function EditorScreen() {
 }
 
 function EditorWorkspace({ initialProject }: { initialProject: CaptionProject }) {
+  const navigation = useNavigation();
   const { height, width } = useWindowDimensions();
   const [project, setProject] = useState(initialProject);
   const projectRef = useRef(project);
@@ -108,6 +134,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
   const [selectedClipId, setSelectedClipId] = useState<string>();
   const [currentMs, setCurrentMs] = useState(0);
   const [progress, setProgress] = useState<TranscriptionProgress>();
+  const [mediaProgress, setMediaProgress] = useState<MediaImportProgress>();
   const [error, setError] = useState<string>();
   const [fontBrowserOpen, setFontBrowserOpen] = useState(false);
   const [pendingChange, setPendingChange] = useState<PendingStyleChange>();
@@ -120,29 +147,94 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
   const redoStackRef = useRef<CaptionProject[]>([]);
   const interactionStartRef = useRef<CaptionProject | undefined>(undefined);
   const [historyVersion, setHistoryVersion] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const exitApprovedRef = useRef(false);
+  const exitPromptOpenRef = useRef(false);
+  const pendingExitActionRef = useRef<NavigationAction | undefined>(undefined);
 
   const persistProject = async (next: CaptionProject) => {
     try {
-      await saveProject(next);
+      await checkpointEditorProject(next);
     } catch (caught) {
       setError(caught instanceof Error ? `Project could not be saved: ${caught.message}` : 'Project could not be saved.');
     }
   };
 
-  const player = useVideoPlayer(initialProject.source.uri, (instance) => {
+  const player = useVideoPlayer(initialProject.sources[0].uri, (instance) => {
     instance.timeUpdateEventInterval = 0.05;
   });
 
+  useEffect(() => navigation.addListener('beforeRemove', (event) => {
+    if (exitApprovedRef.current) return;
+    event.preventDefault();
+    if (exitPromptOpenRef.current) return;
+    exitPromptOpenRef.current = true;
+    pendingExitActionRef.current = event.data.action;
+    player.pause();
+    const finishExit = async (decision: 'save' | 'discard') => {
+      try {
+        if (decision === 'save') {
+          const saved = await saveEditorDraft(projectRef.current);
+          projectRef.current = saved;
+          setProject(saved);
+        } else {
+          await discardEditorSession(initialProject, projectRef.current);
+        }
+        exitApprovedRef.current = true;
+        const action = pendingExitActionRef.current;
+        if (action) navigation.dispatch(action);
+      } catch (caught) {
+        exitPromptOpenRef.current = false;
+        Alert.alert('Could not leave the editor', caught instanceof Error ? caught.message : 'Your choice could not be completed.');
+      }
+    };
+    Alert.alert(
+      'Save this draft?',
+      'Save keeps this editing session in Projects. Discard returns without keeping this session’s changes.',
+      [
+        { text: 'Keep editing', style: 'cancel', onPress: () => { exitPromptOpenRef.current = false; } },
+        { text: 'Discard', style: 'destructive', onPress: () => { void finishExit('discard'); } },
+        { text: 'Save draft', onPress: () => { void finishExit('save'); } },
+      ],
+    );
+  }), [initialProject, navigation, player]);
+
   const clipTimeline = useMemo(() => buildClipTimeline(project.clips), [project.clips]);
-  const timelineDurationMs = clipTimeline.at(-1)?.endMs ?? project.source.durationMs;
+  const timelineDurationMs = clipTimeline.at(-1)?.endMs ?? 0;
   const clipTimelineRef = useRef(clipTimeline);
   const activeClipIdRef = useRef(project.clips[0]?.id);
+  const activeSourceIdRef = useRef(project.clips[0]?.sourceId);
+  const sourceLoadVersionRef = useRef(0);
   useEffect(() => {
     clipTimelineRef.current = clipTimeline;
     if (!clipTimeline.some((entry) => entry.clip.id === activeClipIdRef.current)) {
       activeClipIdRef.current = clipTimeline[0]?.clip.id;
     }
   }, [clipTimeline]);
+
+  useEventListener(player, 'playingChange', ({ isPlaying: nextPlaying }) => setIsPlaying(nextPlaying));
+
+  const activateTimelineEntry = async (
+    entry: (typeof clipTimeline)[number],
+    timelineMs: number,
+    playAfter: boolean,
+  ) => {
+    const source = projectRef.current.sources.find((candidate) => candidate.id === entry.clip.sourceId);
+    if (!source) throw new Error('This clip has lost its source video.');
+    const loadVersion = ++sourceLoadVersionRef.current;
+    player.pause();
+    if (activeSourceIdRef.current !== source.id) {
+      await player.replaceAsync(source.uri);
+      if (loadVersion !== sourceLoadVersionRef.current) return;
+      activeSourceIdRef.current = source.id;
+    }
+    activeClipIdRef.current = entry.clip.id;
+    player.playbackRate = entry.clip.playbackRate;
+    player.muted = entry.clip.muted;
+    player.volume = clipPlaybackVolume(entry.clip, timelineMs - entry.startMs);
+    player.currentTime = sourceTimeAt(entry, timelineMs) / 1000;
+    if (playAfter) player.play();
+  };
 
   useEventListener(player, 'timeUpdate', ({ currentTime }) => {
     const sourceMs = currentTime * 1000;
@@ -154,33 +246,35 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
       setCurrentMs(sourceMs);
       return;
     }
+    player.volume = clipPlaybackVolume(entry.clip, timelineTimeAt(entry, sourceMs) - entry.startMs);
     if (player.playing && sourceMs >= entry.clip.sourceEndMs - 18) {
       const next = entries[index + 1];
       if (next) {
-        activeClipIdRef.current = next.clip.id;
-        player.currentTime = next.clip.sourceStartMs / 1000;
         setCurrentMs(next.startMs);
+        void activateTimelineEntry(next, next.startMs, true).catch((caught) => {
+          setError(caught instanceof Error ? caught.message : 'The next video could not be loaded.');
+        });
       } else {
         player.pause();
         setCurrentMs(entry.endMs);
       }
       return;
     }
-    setCurrentMs(clamp(entry.startMs + sourceMs - entry.clip.sourceStartMs, entry.startMs, entry.endMs));
+    setCurrentMs(clamp(timelineTimeAt(entry, sourceMs), entry.startMs, entry.endMs));
   });
 
   const seekTimeline = (timelineMs: number) => {
     const entry = timelineEntryAt(clipTimelineRef.current, timelineMs);
     if (!entry) return;
-    activeClipIdRef.current = entry.clip.id;
-    const sourceMs = entry.clip.sourceStartMs + clamp(timelineMs - entry.startMs, 0, entry.endMs - entry.startMs);
-    player.currentTime = sourceMs / 1000;
     setCurrentMs(clamp(timelineMs, 0, timelineDurationMs));
+    void activateTimelineEntry(entry, timelineMs, false).catch((caught) => {
+      setError(caught instanceof Error ? caught.message : 'The selected video could not be loaded.');
+    });
   };
 
   useEffect(() => {
     let active = true;
-    void validateProjectSource(initialProject.source.uri).catch((caught) => {
+    void validateProjectSources(initialProject.sources).catch((caught) => {
       if (!active) return;
       setError(
         caught instanceof Error
@@ -189,13 +283,14 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
       );
     });
     return () => { active = false; };
-  }, [initialProject.source.uri]);
+  }, [initialProject.sources]);
 
   const activeCaption = useMemo(
     () => project.captions.find((caption) => currentMs >= caption.startMs && currentMs < caption.endMs),
     [currentMs, project.captions],
   );
   const selectedCaption = project.captions.find((caption) => caption.id === selectedCaptionId);
+  const selectedClip = project.clips.find((clip) => clip.id === selectedClipId);
   const selectedLayer = project.layers.find((layer) => layer.id === selectedLayerId);
   const selectedTextLayer = selectedLayer?.kind === 'text' ? selectedLayer : undefined;
   const selectedImageLayer = selectedLayer?.kind === 'image' ? selectedLayer : undefined;
@@ -205,6 +300,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
       ? resolveCaptionStyle(project.projectStyle, selectedCaption).animation.id
       : project.projectStyle.animation.id;
   const displayCaption = player.playing ? activeCaption : selectedCaption ?? activeCaption;
+  const activeSource = project.sources.find((source) => source.id === activeSourceIdRef.current) ?? project.sources[0];
   const previewHeight = Math.min(Math.max(280, height * 0.43), 500);
   const canvasSize = fitRect(
     Math.max(1, project.canvas.aspectWidth / project.canvas.aspectHeight),
@@ -260,30 +356,11 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
   const generateCaptions = async () => {
     setError(undefined);
     try {
-      const result = await transcribeVideoLocally({
-        projectId: project.id,
-        videoUri: project.source.uri,
-        modelId: 'fast',
-        durationMs: project.source.durationMs,
-        language: 'en',
-        onProgress: setProgress,
-      });
-      const now = new Date().toISOString();
-      const next: CaptionProject = {
-        ...project,
-        updatedAt: now,
-        transcription: {
-          language: result.language,
-          modelId: 'fast',
-          generatedAt: now,
-          words: result.words,
-        },
-        captions: result.captions,
-      };
+      const next = await generateAndSaveProjectCaptions(projectRef.current, setProgress);
       pushUndo();
+      projectRef.current = next;
       setProject(next);
       setSelectedCaptionId(next.captions[0]?.id);
-      await persistProject(next);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Caption generation failed');
     } finally {
@@ -364,15 +441,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
     if (editingText == null) return;
     pushUndo();
     if (editingLayerId) {
-      const next: CaptionProject = {
-        ...projectRef.current,
-        updatedAt: new Date().toISOString(),
-        layers: projectRef.current.layers.map((layer) =>
-          layer.id === editingLayerId && layer.kind === 'text'
-            ? { ...layer, text: editingText.trim() || 'Text', name: (editingText.trim() || 'Text').slice(0, 18) }
-            : layer,
-        ),
-      };
+      const next = setTextLayerText(projectRef.current, editingLayerId, editingText);
       projectRef.current = next;
       setProject(next);
       setEditingLayerId(undefined);
@@ -381,13 +450,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
       return;
     }
     if (!editingCaptionId) return;
-    const next: CaptionProject = {
-      ...projectRef.current,
-      updatedAt: new Date().toISOString(),
-      captions: projectRef.current.captions.map((caption) =>
-        caption.id === editingCaptionId ? { ...caption, text: editingText.trim() } : caption,
-      ),
-    };
+    const next = setCaptionText(projectRef.current, editingCaptionId, editingText);
     projectRef.current = next;
     setProject(next);
     setEditingCaptionId(undefined);
@@ -398,15 +461,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
   const updateTextLayerStyle = (layerId: string, patch: CaptionStylePatch, persist = false) => {
     if (persist) pushUndo();
     setProject((current) => {
-      const next = {
-        ...current,
-        updatedAt: new Date().toISOString(),
-        layers: current.layers.map((layer) =>
-          layer.id === layerId && layer.kind === 'text'
-            ? { ...layer, style: mergeStyle(layer.style, patch) }
-            : layer,
-        ),
-      };
+      const next = setTextLayerStyle(current, layerId, patch);
       projectRef.current = next;
       if (persist) persistProject(next);
       return next;
@@ -424,11 +479,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
 
   const updateVideoTransform = (patch: Partial<CaptionProject['videoTransform']>) => {
     setProject((current) => {
-      const next = {
-        ...current,
-        updatedAt: new Date().toISOString(),
-        videoTransform: { ...current.videoTransform, ...patch },
-      };
+      const next = setVideoTransform(current, patch);
       projectRef.current = next;
       return next;
     });
@@ -436,13 +487,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
 
   const updateCaptionTiming = (captionId: string, startMs: number, endMs: number) => {
     setProject((current) => {
-      const next = {
-        ...current,
-        updatedAt: new Date().toISOString(),
-        captions: current.captions.map((caption) =>
-          caption.id === captionId ? { ...caption, startMs, endMs } : caption,
-        ),
-      };
+      const next = setCaptionTiming(current, captionId, startMs, endMs);
       projectRef.current = next;
       return next;
     });
@@ -450,13 +495,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
 
   const updateLayerTiming = (layerId: string, startMs: number, endMs: number) => {
     setProject((current) => {
-      const next = {
-        ...current,
-        updatedAt: new Date().toISOString(),
-        layers: current.layers.map((layer) =>
-          layer.id === layerId && layer.kind !== 'captions' ? { ...layer, startMs, endMs } : layer,
-        ),
-      };
+      const next = setLayerTiming(current, layerId, startMs, endMs);
       projectRef.current = next;
       return next;
     });
@@ -464,13 +503,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
 
   const updateImageLayer = (layerId: string, patch: Partial<ImageVisualLayer>) => {
     setProject((current) => {
-      const next = {
-        ...current,
-        updatedAt: new Date().toISOString(),
-        layers: current.layers.map((layer) =>
-          layer.id === layerId && layer.kind === 'image' ? { ...layer, ...patch } : layer,
-        ),
-      };
+      const next = setImageLayer(current, layerId, patch);
       projectRef.current = next;
       return next;
     });
@@ -480,27 +513,9 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
     pushUndo();
     const id = uniqueId('text');
     const duration = Math.max(500, timelineDurationMs);
-    const startMs = clamp(currentMs, 0, Math.max(0, duration - 500));
-    const layer: TextVisualLayer = {
-      id,
-      kind: 'text',
-      name: 'New Text',
-      visible: true,
-      text: 'New text',
-      startMs,
-      endMs: Math.min(duration, startMs + 3000),
-      style: mergeStyle(DEFAULT_CAPTION_STYLE, {
-        position: { x: 0.5, y: 0.48 },
-        box: { width: 0.72, height: 0.18 },
-        animation: { id: 'none' },
-      }),
-    };
+    const result = createTextLayer(projectRef.current, id, currentMs, duration);
     setProject((current) => {
-      const firstImage = current.layers.findIndex((item) => item.kind === 'image');
-      const index = firstImage < 0 ? current.layers.length : firstImage;
-      const layers = [...current.layers];
-      layers.splice(index, 0, layer);
-      const next = { ...current, updatedAt: new Date().toISOString(), layers };
+      const next = current === projectRef.current ? result.project : createTextLayer(current, id, currentMs, duration).project;
       projectRef.current = next;
       persistProject(next);
       return next;
@@ -509,7 +524,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
     setSelectedLayerId(id);
     setSelectedCaptionId(undefined);
     setEditingLayerId(id);
-    setEditingText(layer.text);
+    setEditingText(result.layer.text);
   };
 
   const addImageLayer = async () => {
@@ -524,22 +539,15 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
     if (!stored) return;
     pushUndo();
     const duration = Math.max(500, timelineDurationMs);
-    const startMs = clamp(currentMs, 0, Math.max(0, duration - 500));
-    const layer: ImageVisualLayer = {
+    const result = addImageLayerToProject(projectRef.current, {
       id,
-      kind: 'image',
-      name: stored.name.slice(0, 18) || 'Sticker',
-      visible: true,
+      name: stored.name,
       uri: stored.uri,
-      startMs,
-      endMs: Math.min(duration, startMs + 3000),
-      position: { x: 0.5, y: 0.5 },
-      box: { width: 0.34, height: 0.24 },
-      rotation: 0,
-      opacity: 1,
-    };
+      currentMs,
+      durationMs: duration,
+    });
     setProject((current) => {
-      const next = { ...current, updatedAt: new Date().toISOString(), layers: [...current.layers, layer] };
+      const next = current === projectRef.current ? result.project : addImageLayerToProject(current, { id, name: stored.name, uri: stored.uri, currentMs, durationMs: duration }).project;
       projectRef.current = next;
       persistProject(next);
       return next;
@@ -552,12 +560,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
   const moveLayer = (layerId: string, direction: -1 | 1) => {
     pushUndo();
     setProject((current) => {
-      const index = current.layers.findIndex((layer) => layer.id === layerId);
-      const destination = index + direction;
-      if (index < 0 || destination < 0 || destination >= current.layers.length) return current;
-      const layers = [...current.layers];
-      [layers[index], layers[destination]] = [layers[destination], layers[index]];
-      const next = { ...current, updatedAt: new Date().toISOString(), layers };
+      const next = moveVisualLayer(current, layerId, direction);
       projectRef.current = next;
       persistProject(next);
       return next;
@@ -568,7 +571,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
     if (layerId === 'captions') return;
     pushUndo();
     setProject((current) => {
-      const next = { ...current, updatedAt: new Date().toISOString(), layers: current.layers.filter((layer) => layer.id !== layerId) };
+      const next = deleteVisualLayer(current, layerId);
       projectRef.current = next;
       persistProject(next);
       return next;
@@ -576,25 +579,74 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
     setSelectedLayerId('captions');
   };
 
+  const addVideosToTimeline = async () => {
+    setError(undefined);
+    try {
+      const before = projectRef.current;
+      const beforeDuration = totalClipDuration(before.clips);
+      const next = await appendVideosToProject(before, setMediaProgress);
+      if (!next) return;
+      pushUndo(before);
+      projectRef.current = next;
+      clipTimelineRef.current = buildClipTimeline(next.clips);
+      setProject(next);
+      const firstAdded = next.clips[before.clips.length];
+      setSelectedClipId(firstAdded?.id);
+      setSelectedCaptionId(undefined);
+      setActiveTool('video');
+      if (firstAdded) seekTimeline(beforeDuration);
+    } catch (caught) {
+      Alert.alert('Could not add videos', caught instanceof Error ? caught.message : 'The selected videos could not be added.');
+    } finally {
+      setMediaProgress(undefined);
+    }
+  };
+
+  const updateSelectedClip = (patch: Partial<VideoClip>) => {
+    if (!selectedClipId) return;
+    const before = projectRef.current;
+    pushUndo(before);
+    const next = updateVideoClip(before, selectedClipId, patch);
+    projectRef.current = next;
+    clipTimelineRef.current = buildClipTimeline(next.clips);
+    setProject(next);
+    persistProject(next);
+    const entry = buildClipTimeline(next.clips).find((candidate) => candidate.clip.id === selectedClipId);
+    if (entry) void activateTimelineEntry(entry, clamp(currentMs, entry.startMs, entry.endMs), false);
+  };
+
+  const updateSelectedClipRate = (rate: number) => {
+    if (!selectedClipId) return;
+    const before = projectRef.current;
+    const oldEntry = buildClipTimeline(before.clips).find((entry) => entry.clip.id === selectedClipId);
+    if (!oldEntry) return;
+    pushUndo(before);
+    const next = setClipPlaybackRate(before, selectedClipId, rate);
+    projectRef.current = next;
+    clipTimelineRef.current = buildClipTimeline(next.clips);
+    setProject(next);
+    persistProject(next);
+    const entry = buildClipTimeline(next.clips).find((candidate) => candidate.clip.id === selectedClipId);
+    if (entry) {
+      const relativeProgress = clamp((currentMs - oldEntry.startMs) / Math.max(1, oldEntry.endMs - oldEntry.startMs), 0, 1);
+      const nextTime = entry.startMs + relativeProgress * (entry.endMs - entry.startMs);
+      setCurrentMs(nextTime);
+      void activateTimelineEntry(entry, nextTime, false);
+    }
+  };
+
   const splitClipAtPlayhead = () => {
     const entry = timelineEntryAt(clipTimeline, currentMs);
     if (!entry) return;
-    const sourceSplitMs = entry.clip.sourceStartMs + currentMs - entry.startMs;
-    if (sourceSplitMs - entry.clip.sourceStartMs < 120 || entry.clip.sourceEndMs - sourceSplitMs < 120) return;
+    const result = splitVideoClip(projectRef.current, entry.clip.id, currentMs, uniqueId('clip'), uniqueId('clip'));
+    if (!result) return;
     pushUndo();
-    const left: VideoClip = { ...entry.clip, id: uniqueId('clip'), sourceEndMs: sourceSplitMs };
-    const right: VideoClip = { ...entry.clip, id: uniqueId('clip'), sourceStartMs: sourceSplitMs };
-    setProject((current) => {
-      const index = current.clips.findIndex((clip) => clip.id === entry.clip.id);
-      const clips = [...current.clips];
-      clips.splice(index, 1, left, right);
-      const next = { ...current, updatedAt: new Date().toISOString(), clips };
-      projectRef.current = next;
-      persistProject(next);
-      return next;
-    });
-    activeClipIdRef.current = right.id;
-    setSelectedClipId(right.id);
+    projectRef.current = result.project;
+    clipTimelineRef.current = buildClipTimeline(result.project.clips);
+    setProject(result.project);
+    persistProject(result.project);
+    activeClipIdRef.current = result.rightClipId;
+    setSelectedClipId(result.rightClipId);
   };
 
   const deleteSelectedClip = () => {
@@ -604,6 +656,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
     pushUndo();
     const next = rippleDelete(projectRef.current, entry.startMs, entry.endMs, selectedClipId);
     projectRef.current = next;
+    clipTimelineRef.current = buildClipTimeline(next.clips);
     setProject(next);
     setSelectedClipId(next.clips[0]?.id);
     activeClipIdRef.current = next.clips[0]?.id;
@@ -612,31 +665,17 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
   };
 
   const trimClipEdge = (clipId: string, edge: 'start' | 'end', amountMs: number) => {
-    if (amountMs < 1) return;
     const current = projectRef.current;
-    const entry = buildClipTimeline(current.clips).find((item) => item.clip.id === clipId);
-    if (!entry) return;
+    const result = trimVideoClip(current, clipId, edge, amountMs);
+    if (!result) return;
     pushUndo();
-    const safeAmount = clamp(amountMs, 0, Math.max(0, entry.endMs - entry.startMs - 120));
-    const cutStartMs = edge === 'start' ? entry.startMs : entry.endMs - safeAmount;
-    const cutEndMs = edge === 'start' ? entry.startMs + safeAmount : entry.endMs;
-    const rippled = rippleTimedContent(current, cutStartMs, cutEndMs);
-    const next: CaptionProject = {
-      ...rippled,
-      updatedAt: new Date().toISOString(),
-      clips: current.clips.map((clip) =>
-        clip.id === clipId
-          ? edge === 'start'
-            ? { ...clip, sourceStartMs: clip.sourceStartMs + safeAmount }
-            : { ...clip, sourceEndMs: clip.sourceEndMs - safeAmount }
-          : clip,
-      ),
-    };
+    const next = result.project;
     projectRef.current = next;
+    clipTimelineRef.current = buildClipTimeline(next.clips);
     setProject(next);
     persistProject(next);
     player.pause();
-    queueMicrotask(() => seekTimeline(Math.min(cutStartMs, Math.max(0, totalClipDuration(next.clips) - 1))));
+    queueMicrotask(() => seekTimeline(Math.min(result.seekMs, Math.max(0, totalClipDuration(next.clips) - 1))));
   };
 
   const deleteCaption = (captionId: string) => {
@@ -644,15 +683,10 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
     const index = current.captions.findIndex((caption) => caption.id === captionId);
     if (index < 0) return;
     pushUndo();
-    const captions = current.captions.filter((caption) => caption.id !== captionId);
-    const next = {
-      ...current,
-      updatedAt: new Date().toISOString(),
-      captions,
-    };
+    const next = deleteCaptionBlock(current, captionId);
     projectRef.current = next;
     setProject(next);
-    setSelectedCaptionId(captions[Math.min(index, captions.length - 1)]?.id);
+    setSelectedCaptionId(next.captions[Math.min(index, next.captions.length - 1)]?.id);
     persistProject(next);
   };
 
@@ -665,17 +699,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
 
   const setCanvasPreset = async (preset: CaptionProject['canvas']['preset']) => {
     pushUndo();
-    const size = canvasPresetSize(preset, projectRef.current);
-    const next = {
-      ...projectRef.current,
-      updatedAt: new Date().toISOString(),
-      canvas: {
-        ...projectRef.current.canvas,
-        preset,
-        aspectWidth: size.width,
-        aspectHeight: size.height,
-      },
-    };
+    const next = applyCanvasPreset(projectRef.current, preset);
     projectRef.current = next;
     setProject(next);
     await persistProject(next);
@@ -710,10 +734,10 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
               contentFit={project.videoTransform.fit === 'fill' ? 'cover' : 'contain'}
               surfaceType="textureView"
             />
-            {project.source.thumbnailUri && !player.playing && currentMs <= 50 ? (
+            {activeSource?.thumbnailUri && !isPlaying && currentMs <= 50 ? (
               <Image
                 pointerEvents="none"
-                source={{ uri: project.source.thumbnailUri }}
+                source={{ uri: activeSource.thumbnailUri }}
                 contentFit={project.videoTransform.fit === 'fill' ? 'cover' : 'contain'}
                 style={{ position: 'absolute', inset: 0 }}
               />
@@ -778,13 +802,16 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
           })}
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={player.playing ? 'Pause video' : 'Play video'}
+            accessibilityLabel={isPlaying ? 'Pause video' : 'Play video'}
             onPress={() => {
-              if (player.playing) {
+              if (isPlaying) {
                 player.pause();
               } else {
                 setSelectedCaptionId(undefined);
-                player.play();
+                const entry = timelineEntryAt(clipTimelineRef.current, currentMs);
+                if (entry) void activateTimelineEntry(entry, currentMs, true).catch((caught) => {
+                  setError(caught instanceof Error ? caught.message : 'The video could not be played.');
+                });
               }
             }}
             style={{
@@ -798,7 +825,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
               borderRadius: 24,
               backgroundColor: 'rgba(7,9,12,0.76)',
             }}>
-            <Text style={{ color: '#FFF', fontSize: 20 }}>{player.playing ? 'Ⅱ' : '▶'}</Text>
+            <Text style={{ color: '#FFF', fontSize: 20 }}>{isPlaying ? 'Ⅱ' : '▶'}</Text>
           </Pressable>
         </View>
       </View>
@@ -850,21 +877,28 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
           selectedCaptionId={selectedCaptionId}
           selectedClipId={selectedClipId}
           currentMs={currentMs}
+          isPlaying={isPlaying}
           onSeek={seekTimeline}
           onSelectLayer={(layerId) => {
             player.pause();
             setSelectedLayerId(layerId);
+            setSelectedClipId(undefined);
+            setActiveTool('captions');
             if (layerId !== 'captions') setSelectedCaptionId(undefined);
           }}
           onSelectCaption={(caption) => {
             player.pause();
             setSelectedLayerId('captions');
             setSelectedCaptionId(caption.id);
+            setSelectedClipId(undefined);
+            setActiveTool('captions');
             seekTimeline(caption.startMs);
           }}
           onSelectClip={(clipId, startMs) => {
             player.pause();
             setSelectedClipId(clipId);
+            setSelectedCaptionId(undefined);
+            setActiveTool('video');
             seekTimeline(startMs);
           }}
           onTrimClip={trimClipEdge}
@@ -874,10 +908,33 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
           onTimingChangeEnd={finishHistoryInteraction}
           onMoveLayer={moveLayer}
           onDeleteLayer={deleteLayer}
+          onAddVideos={() => { void addVideosToTimeline(); }}
         />
 
         {activeTool === 'video' ? (
           <View style={{ gap: 8 }}>
+            {selectedClip ? (
+              <View style={{ gap: 7 }}>
+                <Text numberOfLines={1} style={{ color: palette.accent, fontSize: 12, fontWeight: '900' }}>
+                  SELECTED CLIP · {project.sources.find((source) => source.id === selectedClip.sourceId)?.displayName ?? 'Video'}
+                </Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+                  <Action label="Split at playhead" onPress={splitClipAtPlayhead} />
+                  <Action label="Delete + close gap" danger disabled={project.clips.length <= 1} onPress={deleteSelectedClip} />
+                  <Action label={selectedClip.muted ? 'Unmute' : 'Mute'} onPress={() => updateSelectedClip({ muted: !selectedClip.muted })} />
+                  <Action label="Volume −" disabled={selectedClip.muted || selectedClip.volume <= 0} onPress={() => updateSelectedClip({ volume: clamp(selectedClip.volume - 0.1, 0, 1) })} />
+                  <Action label={`${Math.round(selectedClip.volume * 100)}% volume`} color="#64E8FF" onPress={() => updateSelectedClip({ volume: 1, muted: false })} />
+                  <Action label="Volume +" disabled={selectedClip.volume >= 1} onPress={() => updateSelectedClip({ volume: clamp(selectedClip.volume + 0.1, 0, 1) })} />
+                  <Action label={selectedClip.fadeInMs ? 'Remove fade in' : 'Fade in'} onPress={() => updateSelectedClip({ fadeInMs: selectedClip.fadeInMs ? 0 : 500 })} />
+                  <Action label={selectedClip.fadeOutMs ? 'Remove fade out' : 'Fade out'} onPress={() => updateSelectedClip({ fadeOutMs: selectedClip.fadeOutMs ? 0 : 500 })} />
+                </ScrollView>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+                  {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4].map((rate) => (
+                    <Action key={rate} label={`${rate}× speed`} color={selectedClip.playbackRate === rate ? '#DFFF35' : undefined} onPress={() => updateSelectedClipRate(rate)} />
+                  ))}
+                </ScrollView>
+              </View>
+            ) : <Text style={{ color: palette.muted, fontSize: 12 }}>Tap a video clip in the timeline to edit that clip.</Text>}
             <VideoTools
               project={project}
               onCanvasPreset={setCanvasPreset}
@@ -896,8 +953,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
               onTransformEnd={finishHistoryInteraction}
             />
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
-              <Action label="Split video at playhead" onPress={splitClipAtPlayhead} />
-              <Action label="Delete selected clip + ripple" danger onPress={deleteSelectedClip} />
+              <Action label="Add videos" onPress={() => { void addVideosToTimeline(); }} />
               <Action label="Add text layer" onPress={addTextLayer} />
               <Action label="Add sticker/image" onPress={() => void addImageLayer()} />
             </ScrollView>
@@ -981,9 +1037,9 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
             borderTopWidth: 1,
             borderTopColor: '#20262D',
           }}>
-          <ToolbarItem label="Captions" active={activeTool === 'captions'} onPress={() => setActiveTool('captions')} />
-          <ToolbarItem label="Fonts" active={activeTool === 'fonts'} onPress={() => { setActiveTool('fonts'); setFontBrowserOpen(true); }} />
-          <ToolbarItem label="Animate" active={activeTool === 'animate'} onPress={() => setActiveTool('animate')} />
+          <ToolbarItem label="Captions" active={activeTool === 'captions'} onPress={() => { setSelectedClipId(undefined); setActiveTool('captions'); }} />
+          <ToolbarItem label="Fonts" active={activeTool === 'fonts'} onPress={() => { setSelectedClipId(undefined); setActiveTool('fonts'); setFontBrowserOpen(true); }} />
+          <ToolbarItem label="Animate" active={activeTool === 'animate'} onPress={() => { setSelectedClipId(undefined); setActiveTool('animate'); }} />
           <ToolbarItem label="Video" active={activeTool === 'video'} onPress={() => setActiveTool('video')} />
         </View>
       </View>
@@ -1013,13 +1069,15 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
         onSave={commitCaptionText}
       />
       <ProgressOverlay progress={progress} />
+      <MediaLoadingOverlay progress={mediaProgress} />
     </View>
   );
 }
 
-function Action(props: { label: string; color?: string; danger?: boolean; onPress: () => void }) {
+function Action(props: { label: string; color?: string; danger?: boolean; disabled?: boolean; onPress: () => void }) {
   return (
     <Pressable
+      disabled={props.disabled}
       onPress={props.onPress}
       style={{
         minHeight: 42,
@@ -1031,6 +1089,7 @@ function Action(props: { label: string; color?: string; danger?: boolean; onPres
         borderWidth: props.danger ? 1 : 0,
         borderColor: props.danger ? '#7A2B38' : 'transparent',
         backgroundColor: props.danger ? '#351D24' : palette.surfaceRaised,
+        opacity: props.disabled ? 0.35 : 1,
       }}>
       {props.color ? <View style={{ width: 14, height: 14, borderRadius: 7, backgroundColor: props.color }} /> : null}
       <Text style={{ color: props.danger ? '#FFBBC8' : palette.text, fontSize: 12, fontWeight: '700' }}>{props.label}</Text>
@@ -1134,20 +1193,6 @@ function stageTitle(stage: TranscriptionProgress['stage']) {
 function formatTime(ms: number) {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, '0')}`;
-}
-
-function orientedSize(width: number, height: number, rotation: number) {
-  return Math.abs(rotation) % 180 === 90
-    ? { width: Math.max(1, height), height: Math.max(1, width) }
-    : { width: Math.max(1, width), height: Math.max(1, height) };
-}
-
-function canvasPresetSize(preset: CaptionProject['canvas']['preset'], project: CaptionProject) {
-  if (preset === '9:16') return { width: 9, height: 16 };
-  if (preset === '16:9') return { width: 16, height: 9 };
-  if (preset === '1:1') return { width: 1, height: 1 };
-  if (preset === '4:5') return { width: 4, height: 5 };
-  return orientedSize(project.source.width ?? 9, project.source.height ?? 16, project.source.rotation ?? 0);
 }
 
 function fitRect(aspect: number, maxWidth: number, maxHeight: number) {

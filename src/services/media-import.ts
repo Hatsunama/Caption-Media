@@ -1,52 +1,84 @@
 import * as DocumentPicker from 'expo-document-picker';
 
 import CaptionMedia from '../../modules/caption-media/src/CaptionMediaModule';
-import { generateProjectThumbnail, storeProjectImage } from '@/services/project-media';
+import { deleteProjectOwnedFiles, generateProjectThumbnail, storeProjectImage } from '@/services/project-media';
 import { requireFreeSpace } from '@/services/storage-policy';
+import type { ProjectVideoSource } from '@/types/project';
 
 const MIN_IMPORT_HEADROOM_BYTES = 32 * 1024 * 1024;
 
-export type LinkedVideo = {
-  videoUri: string;
-  thumbnailUri?: string;
-  fileName: string;
-  mimeType?: string;
-  sizeBytes?: number;
-  durationMs: number;
-  width: number;
-  height: number;
-  rotation: number;
+export type MediaImportProgress = {
+  stage: 'loading' | 'saving';
+  completed: number;
+  total: number;
+  detail: string;
 };
 
-export async function pickLinkedVideo(projectId: string): Promise<LinkedVideo | null> {
+export async function pickLinkedVideos(
+  projectId: string,
+  onProgress?: (progress: MediaImportProgress) => void,
+): Promise<ProjectVideoSource[] | null> {
   const result = await DocumentPicker.getDocumentAsync({
     type: 'video/*',
     copyToCacheDirectory: false,
-    multiple: false,
+    multiple: true,
   });
   if (result.canceled) return null;
+  if (result.assets.length === 0) throw new Error('No videos were returned by the Android picker.');
 
+  onProgress?.({
+    stage: 'loading',
+    completed: 0,
+    total: result.assets.length,
+    detail: `Preparing ${result.assets.length === 1 ? 'your video' : `${result.assets.length} videos`}`,
+  });
   await requireFreeSpace(MIN_IMPORT_HEADROOM_BYTES, 'import a video');
-  const asset = result.assets[0];
+  const sources: ProjectVideoSource[] = [];
   try {
-    await CaptionMedia.persistReadPermission(asset.uri);
-  } catch {
-    throw new Error('Android did not grant lasting access to this video. Select it from Files or Photos and try again.');
+    for (let index = 0; index < result.assets.length; index += 1) {
+      const asset = result.assets[index];
+      const sourceId = `source-${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${index}`;
+      onProgress?.({
+        stage: 'loading',
+        completed: index,
+        total: result.assets.length,
+        detail: `Loading video ${index + 1} of ${result.assets.length}`,
+      });
+      try {
+        await CaptionMedia.persistReadPermission(asset.uri);
+      } catch {
+        throw new Error(`Android did not grant lasting access to ${asset.name}. Select it from Files or Photos and try again.`);
+      }
+      const info = await CaptionMedia.getMediaInfo(asset.uri);
+      if (info.durationMs <= 0) throw new Error(`${asset.name} is not a readable video.`);
+      sources.push({
+        id: sourceId,
+        uri: asset.uri,
+        storageMode: 'linked',
+        thumbnailUri: await generateProjectThumbnail(projectId, sourceId, asset.uri),
+        displayName: asset.name,
+        mimeType: asset.mimeType,
+        sizeBytes: asset.size,
+        durationMs: info.durationMs,
+        width: info.width,
+        height: info.height,
+        rotation: info.rotation,
+      });
+      onProgress?.({
+        stage: 'loading',
+        completed: index + 1,
+        total: result.assets.length,
+        detail: `Loaded video ${index + 1} of ${result.assets.length}`,
+      });
+    }
+  } catch (error) {
+    await deleteProjectOwnedFiles(
+      projectId,
+      sources.map((source) => source.thumbnailUri).filter((uri): uri is string => Boolean(uri)),
+    );
+    throw error;
   }
-  const info = await CaptionMedia.getMediaInfo(asset.uri);
-  if (info.durationMs <= 0) throw new Error('The selected file is not a readable video.');
-
-  return {
-    videoUri: asset.uri,
-    thumbnailUri: await generateProjectThumbnail(projectId, asset.uri),
-    fileName: asset.name,
-    mimeType: asset.mimeType,
-    sizeBytes: asset.size,
-    durationMs: info.durationMs,
-    width: info.width,
-    height: info.height,
-    rotation: info.rotation,
-  };
+  return sources;
 }
 
 export async function pickAndStoreImage(projectId: string, imageId: string) {

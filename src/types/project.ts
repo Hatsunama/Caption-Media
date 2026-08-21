@@ -34,11 +34,8 @@ export type FontReference = {
 };
 
 export type NormalizedTransform = {
-  /** Center point measured from 0 to 1 inside the output canvas. */
   position: { x: number; y: number };
-  /** Object bounds measured as a fraction of the output canvas. */
   box: { width: number; height: number };
-  /** Free rotation in degrees. Values are not restricted to quarter turns. */
   rotation: number;
 };
 
@@ -152,45 +149,57 @@ export type ImageVisualLayer = {
   opacity: number;
 };
 
-/** Ordered top-to-bottom. The first visible layer is rendered above later rows. */
 export type VisualLayer = CaptionsVisualLayer | TextVisualLayer | ImageVisualLayer;
+
+export type ProjectVideoSource = {
+  id: Identifier;
+  uri: string;
+  storageMode: 'linked' | 'copied';
+  sizeBytes?: number;
+  mimeType?: string;
+  thumbnailUri?: string;
+  displayName: string;
+  durationMs: number;
+  width: number;
+  height: number;
+  rotation: number;
+};
 
 export type VideoClip = {
   id: Identifier;
+  sourceId: Identifier;
   sourceStartMs: number;
   sourceEndMs: number;
+  playbackRate: number;
+  volume: number;
+  muted: boolean;
+  fadeInMs: number;
+  fadeOutMs: number;
 };
 
-export type VideoEdit =
-  | { id: Identifier; type: 'trim'; startMs: number; endMs: number }
-  | { id: Identifier; type: 'crop'; x: number; y: number; width: number; height: number }
-  | { id: Identifier; type: 'rotate'; degrees: number }
-  | { id: Identifier; type: 'speed'; rate: number; startMs: number; endMs: number }
-  | { id: Identifier; type: 'volume'; gain: number; startMs: number; endMs: number };
+export type SourceTranscription = {
+  language: string;
+  modelId: string;
+  generatedAt: string;
+  words: WordToken[];
+};
 
 export type CaptionProject = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: Identifier;
   name: string;
   createdAt: string;
   updatedAt: string;
-  source: {
-    uri: string;
-    storageMode?: 'linked' | 'copied';
-    sizeBytes?: number;
-    mimeType?: string;
-    thumbnailUri?: string;
-    displayName: string;
-    durationMs: number;
-    width?: number;
-    height?: number;
-    rotation?: number;
+  lifecycle: {
+    status: 'draft' | 'saved';
   };
+  sources: ProjectVideoSource[];
   transcription: {
     language: string;
     modelId: string;
     generatedAt?: string;
     words: WordToken[];
+    sourceResults: Record<Identifier, SourceTranscription>;
   };
   captions: CaptionBlock[];
   projectStyle: CaptionStyle;
@@ -208,7 +217,6 @@ export type CaptionProject = {
     scale: number;
     rotation: number;
   };
-  videoEdits: VideoEdit[];
   export: {
     resolution: '720p' | '1080p' | 'original';
     format: 'mp4';

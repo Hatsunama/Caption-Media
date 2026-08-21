@@ -10,7 +10,10 @@ import {
   View,
 } from 'react-native';
 
-import { importVideoProject, loadProjectLibrary } from '@/services/project-workflows';
+import { MediaLoadingOverlay } from '@/components/media-loading-overlay';
+import { totalClipDuration } from '@/lib/video-timeline';
+import type { MediaImportProgress } from '@/services/media-import';
+import { deleteProjectCompletely, importVideoProject, loadProjectLibrary } from '@/services/project-workflows';
 import type { CaptionProject } from '@/types/project';
 
 const palette = {
@@ -28,6 +31,7 @@ export default function ProjectsScreen() {
   const [projects, setProjects] = useState<CaptionProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState<MediaImportProgress>();
 
   const refresh = useCallback(async () => {
     try {
@@ -44,7 +48,7 @@ export default function ProjectsScreen() {
   const importVideo = async () => {
     setImporting(true);
     try {
-      const project = await importVideoProject();
+      const project = await importVideoProject(setImportProgress);
       if (!project) return;
       router.push({
         pathname: '/editor',
@@ -56,11 +60,31 @@ export default function ProjectsScreen() {
         error instanceof Error ? error.message : 'The selected video could not be copied.',
       );
     } finally {
+      setImportProgress(undefined);
       setImporting(false);
     }
   };
 
-  return (
+  const confirmDeleteProject = (project: CaptionProject) => {
+    Alert.alert(
+      'Delete this project?',
+      `“${project.name}” and its Caption Studio edits will be removed. Your original videos will not be changed.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete project',
+          style: 'destructive',
+          onPress: () => {
+            void deleteProjectCompletely(project.id)
+              .then(refresh)
+              .catch((error) => Alert.alert('Could not delete project', error instanceof Error ? error.message : 'Try again.'));
+          },
+        },
+      ],
+    );
+  };
+
+  return <>
     <FlatList
       contentInsetAdjustmentBehavior="automatic"
       style={{ flex: 1, backgroundColor: palette.background }}
@@ -161,15 +185,16 @@ export default function ProjectsScreen() {
             })
           }
           style={{
+            position: 'relative',
             flexDirection: 'row',
             gap: 14,
             padding: 12,
             borderRadius: 18,
             backgroundColor: palette.surfaceRaised,
           }}>
-          {item.source.thumbnailUri ? (
+          {item.sources[0]?.thumbnailUri ? (
             <Image
-              source={{ uri: item.source.thumbnailUri }}
+              source={{ uri: item.sources[0].thumbnailUri }}
               style={{ width: 74, height: 74, borderRadius: 12, backgroundColor: '#050607' }}
               contentFit="cover"
               transition={160}
@@ -180,17 +205,29 @@ export default function ProjectsScreen() {
             </View>
           )}
           <View style={{ flex: 1, justifyContent: 'center', gap: 5 }}>
-            <Text numberOfLines={1} style={{ color: palette.text, fontSize: 16, fontWeight: '700' }}>
+            <Text numberOfLines={1} style={{ color: palette.text, fontSize: 16, fontWeight: '700', paddingRight: 36 }}>
               {item.name}
             </Text>
             <Text style={{ color: palette.muted, fontSize: 13 }}>
-              {item.captions.length} subtitles · {formatDuration(item.source.durationMs)}
+              {item.lifecycle.status === 'draft' ? 'DRAFT · ' : ''}{item.clips.length} clip{item.clips.length === 1 ? '' : 's'} · {item.captions.length} subtitles · {formatDuration(totalClipDuration(item.clips))}
             </Text>
           </View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Delete ${item.name}`}
+            hitSlop={10}
+            onPress={(event) => {
+              event.stopPropagation();
+              confirmDeleteProject(item);
+            }}
+            style={{ position: 'absolute', right: 10, top: 10, width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 17, backgroundColor: '#2B1820' }}>
+            <Text style={{ color: '#FF7C8D', fontSize: 17 }}>🗑</Text>
+          </Pressable>
         </Pressable>
       )}
     />
-  );
+    <MediaLoadingOverlay progress={importProgress} />
+  </>;
 }
 
 function formatDuration(durationMs: number) {
