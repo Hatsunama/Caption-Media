@@ -52,7 +52,7 @@ The first time `adb devices` runs, unlock the phone. Tap **Allow** on **Allow US
 - Multi-select Android video import that accepts any number of clips while keeping durable source links instead of duplicating full videos into app cache
 - A visible loading dialog immediately after the system picker accepts the videos
 - Source-orientation-aware preview
-- Persistent first-frame thumbnails in the editor and project list, with readable date/time names replacing UUIDs and camera-number filenames
+- Persistent first-frame thumbnails on project cards, with readable date/time names replacing UUIDs and camera-number filenames
 - A dedicated `com.hatsunama.captionstudio` Android identity so Caption Studio installs as its own app
 - On-device Whisper transcription through `whisper.rn`
 - Native Android audio decoding to PCM WAV without a cloud API
@@ -61,10 +61,12 @@ The first time `adb devices` runs, unlock the phone. Tap **Allow** on **Allow US
 - Safe **Generate again** control for replacing caption text/timing while preserving the project style and added layers
 - Downloadable Fast, Balanced, and Accurate Whisper model tiers
 - Caption grouping from word timestamps
-- A layered, magnetic timeline with multiple source-aware video clips plus reorderable caption, added-text, and image/sticker tracks
+- A fixed-scale layered timeline: trimming either video edge visibly replaces removed source time with playable black space instead of rescaling the ruler or snapping the clip back to zero
+- Magnetic clip packing by default, explicit removable gaps when wanted, and reorderable caption, added-text, and image/sticker tracks
 - Automatic playhead-follow scrolling, fractional-second ruler markings, pinch/buttons for much wider zoom ranges, and a visible zoom percentage
 - A floating timeline add button for appending one or many videos to the end
 - Neon pink/blue/green subtitle blocks that stay end-to-end on one lane; genuine overlaps automatically move to additional visible lanes so no subtitle can hide underneath another
+- TikTok-style script boundaries: press Enter between words to split one subtitle at its spoken-word timing, or Backspace at the beginning to merge with the block above
 - Always-visible left and right timing grips: drag either edge directly, even before selecting the subtitle, while the block body remains available for timeline scrolling
 - Clear **Undo** and **Redo** controls directly below the video for timeline, transform, style, layer, and video-edit changes
 - TikTok-style caption manipulation: drag to move, pinch to resize text, twist to rotate, resize from four large edge bars, or use the corner resize/rotate control
@@ -77,7 +79,8 @@ The first time `adb devices` runs, unlock the phone. Tap **Allow** on **Allow US
 - Source, 9:16, 16:9, 1:1, and 4:5 canvases
 - Fit and Fill framing for making a wide clip fill a TikTok canvas
 - Direct video drag, pinch-to-resize, two-finger rotation, size buttons, 90-degree rotation, and a precise free-angle scrubber
-- Nondestructive video split, clip deletion, edge trimming, speed, volume, mute, and audio fades with magnetic ripple updates to timed captions and visual layers
+- Nondestructive video split, reversible two-sided edge trimming with caption restoration, speed, volume, mute, and audio fades; cropped ranges and their captions hide inside explicit removable black gaps
+- Continuous playback across same-source splits and different video files, with a single native preview surface that prevents stale first-frame compositing
 - An explicit Save draft / Discard / Keep editing decision whenever the user backs out of the editor
 - Confirmed project deletion from a trash control on every project card; linked source videos are never deleted
 - Local SQLite project snapshots

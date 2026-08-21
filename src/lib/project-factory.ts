@@ -51,8 +51,12 @@ export function createVideoClip(source: ProjectVideoSource, index = 0) {
   return {
     id: `clip-${source.id}-${index}`,
     sourceId: source.id,
+    availableSourceStartMs: 0,
+    availableSourceEndMs: source.durationMs,
     sourceStartMs: 0,
     sourceEndMs: source.durationMs,
+    gapBeforeMs: 0,
+    gapAfterMs: 0,
     playbackRate: 1,
     volume: 1,
     muted: false,

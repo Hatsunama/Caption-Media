@@ -1,5 +1,11 @@
 import * as SQLite from 'expo-sqlite';
 
+import {
+  anchorCaptionsToClips,
+  mapSourceWordsToTimeline,
+  MINIMUM_CLIP_TIMELINE_MS,
+  recoverCanonicalSourceWords,
+} from '@/lib/video-timeline';
 import { DEFAULT_CAPTION_STYLE, type CaptionProject, type ProjectVideoSource, type VideoClip } from '@/types/project';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | undefined;
@@ -119,32 +125,49 @@ function parseProject(value: string): CaptionProject {
 }
 
 function hydrateProject(project: CaptionProject): CaptionProject {
+  const sources = project.sources.map((source) => ({
+    ...source,
+    storageMode: source.storageMode ?? (source.uri.startsWith('content:') ? 'linked' : 'copied'),
+    width: Math.max(1, source.width ?? 1),
+    height: Math.max(1, source.height ?? 1),
+    rotation: source.rotation ?? 0,
+  }));
   const hydratedProjectStyle = {
     ...DEFAULT_CAPTION_STYLE,
     ...project.projectStyle,
     position: { ...DEFAULT_CAPTION_STYLE.position, ...project.projectStyle?.position },
     box: { ...DEFAULT_CAPTION_STYLE.box, ...project.projectStyle?.box },
   };
+  const clips = hydrateClips(project.clips, sources);
+  const persistedSourceResults = project.transcription.sourceResults ?? {};
+  const recoveredFromTimeline = Object.keys(persistedSourceResults).length === 0;
+  const recoveredSourceResults = !recoveredFromTimeline
+    ? persistedSourceResults
+    : recoverCanonicalSourceResults(project, clips);
+  const wordsForAnchoring = Object.keys(recoveredSourceResults).length > 0
+    ? mapSourceWordsToTimeline(
+        clips,
+        Object.fromEntries(Object.entries(recoveredSourceResults).map(([sourceId, result]) => [sourceId, result.words])),
+      )
+    : project.transcription.words;
+  const transcription = {
+    ...project.transcription,
+    words: recoveredFromTimeline ? wordsForAnchoring : project.transcription.words,
+    sourceResults: recoveredSourceResults,
+  };
   return {
     ...project,
     schemaVersion: 2,
     lifecycle: project.lifecycle ?? { status: 'saved' },
-    sources: project.sources.map((source) => ({
-      ...source,
-      storageMode: source.storageMode ?? (source.uri.startsWith('content:') ? 'linked' : 'copied'),
-      width: Math.max(1, source.width ?? 1),
-      height: Math.max(1, source.height ?? 1),
-      rotation: source.rotation ?? 0,
-    })),
-    transcription: {
-      ...project.transcription,
-      sourceResults: project.transcription.sourceResults ?? {},
-    },
+    sources,
+    transcription,
+    captions: anchorCaptionsToClips(project.captions, clips, wordsForAnchoring),
     projectStyle: hydratedProjectStyle,
     layers: (project.layers ?? [{ id: 'captions', kind: 'captions', name: 'Captions', visible: true }]).map((layer) =>
       layer.kind === 'text'
         ? {
             ...layer,
+            timelineVisible: layer.timelineVisible ?? true,
             style: {
               ...DEFAULT_CAPTION_STYLE,
               ...layer.style,
@@ -152,9 +175,11 @@ function hydrateProject(project: CaptionProject): CaptionProject {
               box: { ...DEFAULT_CAPTION_STYLE.box, ...layer.style?.box },
             },
           }
-        : layer,
+        : layer.kind === 'image'
+          ? { ...layer, timelineVisible: layer.timelineVisible ?? true }
+          : layer,
     ),
-    clips: project.clips.map(hydrateClip),
+    clips,
     canvas: project.canvas ?? {
       preset: 'source',
       aspectWidth: project.sources[0]?.width ?? 9,
@@ -170,15 +195,82 @@ function hydrateProject(project: CaptionProject): CaptionProject {
   };
 }
 
-function hydrateClip(clip: VideoClip): VideoClip {
-  return {
-    ...clip,
-    playbackRate: clip.playbackRate ?? 1,
-    volume: clip.volume ?? 1,
-    muted: clip.muted ?? false,
-    fadeInMs: clip.fadeInMs ?? 0,
-    fadeOutMs: clip.fadeOutMs ?? 0,
-  };
+function hydrateClips(clips: VideoClip[], sources: ProjectVideoSource[]): VideoClip[] {
+  const sourceById = new Map(sources.map((source) => [source.id, source]));
+  const ids = new Set<string>();
+  const normalized = clips.map((clip) => {
+    if (!clip?.id || ids.has(clip.id)) throw new Error('Project video clips have duplicate or missing identifiers');
+    ids.add(clip.id);
+    const source = sourceById.get(clip.sourceId);
+    if (!source) throw new Error('A project video clip has lost its source');
+    const sourceStartMs = finiteNumber(clip.sourceStartMs, 'clip source start');
+    const sourceEndMs = finiteNumber(clip.sourceEndMs, 'clip source end');
+    const playbackRate = clip.playbackRate ?? 1;
+    if (!Number.isFinite(playbackRate) || playbackRate < 0.25 || playbackRate > 4) {
+      throw new Error('A project video clip has an invalid playback rate');
+    }
+    if (
+      sourceStartMs < 0
+      || sourceEndMs > source.durationMs + 1
+      || (sourceEndMs - sourceStartMs) / playbackRate < MINIMUM_CLIP_TIMELINE_MS
+    ) {
+      throw new Error('A project video clip has invalid source bounds');
+    }
+    const gapBeforeMs = clip.gapBeforeMs ?? 0;
+    if (!Number.isFinite(gapBeforeMs) || gapBeforeMs < 0) throw new Error('A project video gap is invalid');
+    const gapAfterMs = clip.gapAfterMs ?? 0;
+    if (!Number.isFinite(gapAfterMs) || gapAfterMs < 0) throw new Error('A project video gap is invalid');
+    return {
+      ...clip,
+      sourceStartMs,
+      sourceEndMs,
+      gapBeforeMs,
+      gapAfterMs,
+      playbackRate,
+      volume: clip.volume ?? 1,
+      muted: clip.muted ?? false,
+      fadeInMs: clip.fadeInMs ?? 0,
+      fadeOutMs: clip.fadeOutMs ?? 0,
+    };
+  });
+
+  return normalized.map((clip, index) => {
+    const source = sourceById.get(clip.sourceId)!;
+    const previous = normalized[index - 1];
+    const next = normalized[index + 1];
+    const inferredStart = previous?.sourceId === clip.sourceId
+      ? (previous.sourceEndMs + clip.sourceStartMs) / 2
+      : 0;
+    const inferredEnd = next?.sourceId === clip.sourceId
+      ? (clip.sourceEndMs + next.sourceStartMs) / 2
+      : source.durationMs;
+    const availableSourceStartMs = clip.availableSourceStartMs ?? inferredStart;
+    const availableSourceEndMs = clip.availableSourceEndMs ?? inferredEnd;
+    if (
+      !Number.isFinite(availableSourceStartMs)
+      || !Number.isFinite(availableSourceEndMs)
+      || availableSourceStartMs < 0
+      || availableSourceStartMs > clip.sourceStartMs
+      || availableSourceEndMs < clip.sourceEndMs
+      || availableSourceEndMs > source.durationMs + 1
+    ) throw new Error('A project video clip has invalid recoverable handles');
+    return { ...clip, availableSourceStartMs, availableSourceEndMs };
+  });
+}
+
+function finiteNumber(value: number, label: string) {
+  if (!Number.isFinite(value)) throw new Error(`Project ${label} is invalid`);
+  return value;
+}
+
+function recoverCanonicalSourceResults(project: CaptionProject, clips: VideoClip[]) {
+  const wordsBySource = recoverCanonicalSourceWords(clips, project.transcription.words);
+  return Object.fromEntries(Object.entries(wordsBySource).map(([sourceId, words]) => [sourceId, {
+    language: project.transcription.language,
+    modelId: project.transcription.modelId,
+    generatedAt: project.transcription.generatedAt ?? project.updatedAt,
+    words,
+  }]));
 }
 
 function migrateVersionOne(candidate: Record<string, unknown>): CaptionProject {
@@ -216,8 +308,8 @@ function migrateVersionOne(candidate: Record<string, unknown>): CaptionProject {
     lifecycle: { status: 'saved' },
     sources: [source],
     clips: (legacy.clips?.length ? legacy.clips : [{ id: 'source-clip', sourceStartMs: 0, sourceEndMs: source.durationMs }])
-      .map((clip) => hydrateClip({ ...clip, id: String(clip.id), sourceId } as VideoClip)),
-    transcription: { ...legacy.transcription, sourceResults: {} },
+      .map((clip) => ({ ...clip, id: String(clip.id), sourceId } as VideoClip)),
+    transcription: { ...legacy.transcription, sourceResults: legacy.transcription.sourceResults ?? {} },
   };
   delete migrated.source;
   delete migrated.videoEdits;

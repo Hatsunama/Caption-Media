@@ -1,5 +1,5 @@
-import { groupWordsIntoCaptions } from '@/lib/caption-grouping';
-import { mapSourceWordsToTimeline } from '@/lib/video-timeline';
+import { groupTimelineWordsByClip } from '@/lib/caption-grouping';
+import { anchorCaptionsToClips, mapSourceWordsToTimeline } from '@/lib/video-timeline';
 import { transcribeVideoLocally, type TranscriptionProgress } from '@/services/transcription';
 import type { CaptionProject, SourceTranscription, WordToken } from '@/types/project';
 
@@ -48,7 +48,8 @@ export async function generateProjectCaptions(
   const sourceWords: Record<string, WordToken[]> = {};
   for (const [sourceId, result] of Object.entries(sourceResults)) sourceWords[sourceId] = result.words;
   const words = mapSourceWordsToTimeline(project.clips, sourceWords);
-  const captions = groupWordsIntoCaptions(words);
+  const grouped = groupTimelineWordsByClip(words, project.clips.map((clip) => clip.id));
+  const captions = anchorCaptionsToClips(grouped, project.clips, words);
   const now = new Date().toISOString();
   return {
     ...project,

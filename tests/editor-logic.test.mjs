@@ -4,14 +4,24 @@ import test from 'node:test';
 
 import { spokenAnimationClock } from '../src/lib/animation-timing.ts';
 import { reactionEmojis } from '../src/lib/animation-presets.ts';
-import { groupWordsIntoCaptions } from '../src/lib/caption-grouping.ts';
+import { groupTimelineWordsByClip, groupWordsIntoCaptions } from '../src/lib/caption-grouping.ts';
 import { alignWordsToSpeech } from '../src/lib/speech-alignment.ts';
 import { packTimelineLanes } from '../src/lib/timeline-layout.ts';
 import { minimumTimelineScale, timelineScrollOffset, timelineTickInterval, timelineTimeAtScroll, timelineWidth } from '../src/lib/timeline-scale.ts';
 import { PREPARING_AUDIO_CUES } from '../src/lib/transcription-progress.ts';
 import { humanVideoName, isMachineVideoName } from '../src/lib/project-presentation.ts';
 import { applyCaptionTextChanges } from '../src/lib/caption-text-edits.ts';
-import { buildClipTimeline, clipPlaybackVolume, mapSourceWordsToTimeline } from '../src/lib/video-timeline.ts';
+import { mergeCaptionScriptBlock, splitCaptionScriptBlock } from '../src/lib/caption-script.ts';
+import { deleteVideoClip, previewVideoClipTrim, setVideoClipGap, splitVideoClip, trimVideoClip } from '../src/lib/project-editor.ts';
+import {
+  buildClipTimeline,
+  clipPlaybackVolume,
+  mapSourceWordsToTimeline,
+  recoverCanonicalSourceWords,
+  timelineSegmentAt,
+  totalClipDuration,
+  visibleTimelineCaptions,
+} from '../src/lib/video-timeline.ts';
 
 test('Caption Studio has an isolated Android identity', () => {
   const appConfig = JSON.parse(readFileSync(new URL('../app.json', import.meta.url), 'utf8'));
@@ -71,12 +81,317 @@ test('production builds cannot use the debug signing config', () => {
   ]);
 });
 
-test('clip timeline has no dead space between source segments', () => {
+test('clips magnetically pack by default while intentional gaps remain explicit and removable', () => {
   const timeline = buildClipTimeline([
     clip({ id: 'one', sourceStartMs: 5_000, sourceEndMs: 8_000 }),
-    clip({ id: 'two', sourceStartMs: 20_000, sourceEndMs: 22_500 }),
+    clip({ id: 'two', sourceStartMs: 20_000, sourceEndMs: 22_500, gapBeforeMs: 750 }),
   ]);
-  assert.deepEqual(timeline.map(({ startMs, endMs }) => [startMs, endMs]), [[0, 3_000], [3_000, 5_500]]);
+  assert.deepEqual(timeline.map(({ gapStartMs, startMs, endMs }) => [gapStartMs, startMs, endMs]), [
+    [0, 0, 3_000],
+    [3_000, 3_750, 6_250],
+  ]);
+  assert.deepEqual(timelineSegmentAt(timeline, 3_200), {
+    kind: 'gap',
+    startMs: 3_000,
+    endMs: 3_750,
+    next: timeline[1],
+  });
+
+  const project = projectFixture({ clips: timeline.map(({ clip: item }) => item) });
+  const removed = setVideoClipGap(project, 'two', 0);
+  assert.ok(removed);
+  assert.deepEqual(buildClipTimeline(removed.project.clips).map(({ startMs, endMs }) => [startMs, endMs]), [
+    [0, 3_000],
+    [3_000, 5_500],
+  ]);
+});
+
+test('video clip body owns Android drag arbitration instead of competing with a parent pressable', () => {
+  const timeline = readFileSync(new URL('../src/components/editor/layer-timeline.tsx', import.meta.url), 'utf8');
+  const clipBlock = timeline.slice(timeline.indexOf('function VideoClipBlock'), timeline.indexOf('function VideoTrimGrip'));
+  const moveGrip = timeline.slice(timeline.indexOf('function VideoMoveGrip'), timeline.indexOf('function VideoGapBlock'));
+  assert.match(clipBlock, /<View[\s\S]*<VideoMoveGrip/);
+  assert.doesNotMatch(clipBlock, /<Pressable/);
+  assert.match(moveGrip, /onStartShouldSetPanResponder: \(\) => true/);
+  assert.match(moveGrip, /draggedRef/);
+});
+
+test('both clip handles can restore trimmed media without losing edited captions', () => {
+  const sourceWords = [
+    { id: 'early', text: 'restored', startMs: 200, endMs: 700 },
+    { id: 'middle', text: 'manual', startMs: 1_500, endMs: 2_000 },
+    { id: 'late', text: 'ending', startMs: 3_200, endMs: 3_700 },
+  ];
+  const project = projectFixture({
+    clips: [clip({ id: 'main', sourceEndMs: 4_000, availableSourceEndMs: 4_000 })],
+    transcription: {
+      language: 'en',
+      modelId: 'fast',
+      words: sourceWords.map((word) => ({ ...word, id: `main-${word.id}` })),
+      sourceResults: {
+        source: { language: 'en', modelId: 'fast', generatedAt: '2026-01-01T00:00:00.000Z', words: sourceWords },
+      },
+    },
+    captions: [{
+      id: 'caption-early',
+      text: 'My edited opening',
+      textMode: 'manual',
+      startMs: 200,
+      endMs: 700,
+      wordIds: ['main-early'],
+      timelineVisible: true,
+      sourceAnchor: { clipId: 'main', sourceStartMs: 200, sourceEndMs: 700, wordIds: ['main-early'] },
+      styleOverride: { textColor: '#19D98B' },
+    }],
+  });
+
+  const headTrimmed = trimVideoClip(project, 'main', 'start', 1_000);
+  assert.ok(headTrimmed);
+  assert.equal(headTrimmed.project.clips[0].gapBeforeMs, 1_000);
+  assert.equal(totalClipDuration(headTrimmed.project.clips), 4_000);
+  assert.equal(visibleTimelineCaptions(headTrimmed.project.captions).length, 0);
+  const headRestored = trimVideoClip(headTrimmed.project, 'main', 'start', 0);
+  assert.ok(headRestored);
+  assert.deepEqual(headRestored.project.clips.map(({ sourceStartMs, sourceEndMs }) => [sourceStartMs, sourceEndMs]), [[0, 4_000]]);
+  assert.equal(headRestored.project.clips[0].gapBeforeMs, 0);
+  assert.deepEqual(visibleTimelineCaptions(headRestored.project.captions).map(({ id, text, styleOverride }) => ({ id, text, styleOverride })), [{
+    id: 'caption-early',
+    text: 'My edited opening',
+    styleOverride: { textColor: '#19D98B' },
+  }]);
+
+  const tailTrimmed = trimVideoClip(headRestored.project, 'main', 'end', 2_500);
+  assert.ok(tailTrimmed);
+  assert.equal(tailTrimmed.project.clips[0].sourceEndMs, 2_500);
+  assert.equal(tailTrimmed.project.clips[0].gapAfterMs, 1_500);
+  assert.equal(totalClipDuration(tailTrimmed.project.clips), 4_000);
+  assert.deepEqual(timelineSegmentAt(buildClipTimeline(tailTrimmed.project.clips), 3_000), {
+    kind: 'gap',
+    startMs: 2_500,
+    endMs: 4_000,
+    next: undefined,
+  });
+  const tailRestored = trimVideoClip(tailTrimmed.project, 'main', 'end', 4_000);
+  assert.ok(tailRestored);
+  assert.equal(tailRestored.project.clips[0].sourceEndMs, 4_000);
+  assert.equal(tailRestored.project.clips[0].gapAfterMs, 0);
+  assert.equal(tailRestored.project.transcription.words.at(-1).text, 'ending');
+});
+
+test('trim previews keep a fixed timeline duration and do not move neighboring clips', () => {
+  const first = clip({ id: 'first', sourceEndMs: 5_000, availableSourceEndMs: 5_000 });
+  const second = clip({
+    id: 'second',
+    sourceStartMs: 5_000,
+    sourceEndMs: 10_000,
+    availableSourceStartMs: 5_000,
+    availableSourceEndMs: 10_000,
+  });
+  const before = buildClipTimeline([first, second]);
+  const headPreview = previewVideoClipTrim(first, 'start', 2_000);
+  const headTimeline = buildClipTimeline([headPreview, second]);
+  assert.equal(headPreview.gapBeforeMs, 2_000);
+  assert.equal(headTimeline.at(-1).afterGapEndMs, before.at(-1).afterGapEndMs);
+  assert.equal(headTimeline[1].startMs, before[1].startMs);
+
+  const tailPreview = previewVideoClipTrim(first, 'end', 3_000);
+  const tailTimeline = buildClipTimeline([tailPreview, second]);
+  assert.equal(tailPreview.gapAfterMs, 2_000);
+  assert.equal(tailTimeline.at(-1).afterGapEndMs, before.at(-1).afterGapEndMs);
+  assert.equal(tailTimeline[1].startMs, before[1].startMs);
+});
+
+test('text and image overlays hidden by a trim return with their transforms intact', () => {
+  const project = projectFixture({
+    layers: [
+      { id: 'captions', kind: 'captions', name: 'Captions', visible: true },
+      {
+        id: 'title',
+        kind: 'text',
+        name: 'Title',
+        visible: true,
+        text: 'Keep me',
+        startMs: 200,
+        endMs: 700,
+        style: { marker: 'unchanged' },
+      },
+      {
+        id: 'sticker',
+        kind: 'image',
+        name: 'Sticker',
+        visible: true,
+        uri: 'content://sticker',
+        startMs: 250,
+        endMs: 650,
+        position: { x: 0.2, y: 0.3 },
+        box: { width: 0.4, height: 0.5 },
+        rotation: 17,
+        opacity: 0.8,
+      },
+    ],
+  });
+  const hidden = trimVideoClip(project, 'main', 'start', 1_000);
+  assert.ok(hidden);
+  assert.deepEqual(hidden.project.layers.slice(1).map((layer) => [layer.id, layer.timelineVisible]), [
+    ['title', false],
+    ['sticker', false],
+  ]);
+  const restored = trimVideoClip(hidden.project, 'main', 'start', 0);
+  assert.ok(restored);
+  assert.deepEqual(restored.project.layers.slice(1).map((layer) => ({
+    id: layer.id,
+    visible: layer.timelineVisible,
+    startMs: layer.startMs,
+    endMs: layer.endMs,
+    rotation: layer.rotation,
+    style: layer.style,
+  })), [
+    { id: 'title', visible: true, startMs: 200, endMs: 700, rotation: undefined, style: { marker: 'unchanged' } },
+    { id: 'sticker', visible: true, startMs: 250, endMs: 650, rotation: 17, style: undefined },
+  ]);
+});
+
+test('splitting partitions recoverable handles so neighboring clips cannot overlap', () => {
+  const project = projectFixture({ clips: [clip({ id: 'whole', sourceEndMs: 4_000, availableSourceEndMs: 4_000 })] });
+  const result = splitVideoClip(project, 'whole', 1_500, 'left', 'right');
+  assert.ok(result);
+  assert.equal(result.project.clips[0].availableSourceEndMs, 1_500);
+  assert.equal(result.project.clips[1].availableSourceStartMs, 1_500);
+  assert.equal(result.project.clips[1].gapBeforeMs, 0);
+});
+
+test('caption grouping always breaks at hard video cuts', () => {
+  const captions = groupTimelineWordsByClip([
+    { id: 'clip-a-last', text: 'hello', startMs: 900, endMs: 1_000 },
+    { id: 'clip-b-first', text: 'world', startMs: 1_000, endMs: 1_100 },
+  ], ['clip-a', 'clip-b']);
+  assert.deepEqual(captions.map((caption) => [caption.id, caption.text]), [
+    ['caption-clip-a-1', 'hello'],
+    ['caption-clip-b-1', 'world'],
+  ]);
+});
+
+test('splitting through an automatic caption preserves both owned halves', () => {
+  const sourceWords = [
+    { id: 'hello', text: 'hello', startMs: 500, endMs: 900 },
+    { id: 'world', text: 'world', startMs: 2_100, endMs: 2_500 },
+  ];
+  const project = projectFixture({
+    clips: [clip({ id: 'whole', sourceEndMs: 4_000, availableSourceEndMs: 4_000 })],
+    transcription: {
+      language: 'en',
+      modelId: 'fast',
+      words: sourceWords.map((word) => ({ ...word, id: `whole-${word.id}` })),
+      sourceResults: {
+        source: { language: 'en', modelId: 'fast', generatedAt: '2026-01-01T00:00:00.000Z', words: sourceWords },
+      },
+    },
+    captions: [{
+      id: 'sentence',
+      text: 'hello world',
+      textMode: 'automatic',
+      timelineVisible: true,
+      startMs: 500,
+      endMs: 2_500,
+      wordIds: ['whole-hello', 'whole-world'],
+    }],
+    layers: [
+      { id: 'captions', kind: 'captions', name: 'Captions', visible: true },
+      {
+        id: 'crossing-title',
+        kind: 'text',
+        name: 'Crossing title',
+        visible: true,
+        text: 'Across the cut',
+        startMs: 500,
+        endMs: 2_500,
+        style: { marker: 'preserved' },
+      },
+    ],
+  });
+  const result = splitVideoClip(project, 'whole', 1_500, 'left', 'right');
+  assert.ok(result);
+  assert.deepEqual(visibleTimelineCaptions(result.project.captions).map((caption) => [
+    caption.text,
+    caption.sourceAnchor.clipId,
+  ]), [['hello', 'left'], ['world', 'right']]);
+  assert.deepEqual(result.project.layers[1].sourceAnchors.map((anchor) => anchor.clipId), ['left', 'right']);
+  assert.deepEqual([result.project.layers[1].startMs, result.project.layers[1].endMs], [500, 2_500]);
+  const gapped = setVideoClipGap(result.project, 'right', 500);
+  assert.ok(gapped);
+  assert.deepEqual(visibleTimelineCaptions(gapped.project.captions).map((caption) => caption.text), ['hello', 'world']);
+});
+
+test('deleting an earlier clip preserves manual downstream caption text, identity, and style', () => {
+  const sourceWords = [{ id: 'spoken', text: 'automatic', startMs: 2_500, endMs: 3_000 }];
+  const project = projectFixture({
+    clips: [
+      clip({ id: 'first', sourceEndMs: 2_000, availableSourceEndMs: 2_000 }),
+      clip({ id: 'second', sourceStartMs: 2_000, sourceEndMs: 4_000, availableSourceStartMs: 2_000, availableSourceEndMs: 4_000 }),
+    ],
+    transcription: {
+      language: 'en',
+      modelId: 'fast',
+      words: [{ ...sourceWords[0], id: 'second-spoken' }],
+      sourceResults: {
+        source: { language: 'en', modelId: 'fast', generatedAt: '2026-01-01T00:00:00.000Z', words: sourceWords },
+      },
+    },
+    captions: [{
+      id: 'manual-second',
+      text: 'My exact edit',
+      textMode: 'manual',
+      timelineVisible: true,
+      startMs: 2_500,
+      endMs: 3_000,
+      wordIds: ['second-spoken'],
+      sourceAnchor: { clipId: 'second', sourceStartMs: 2_500, sourceEndMs: 3_000, wordIds: ['second-spoken'] },
+      styleOverride: { textColor: '#FF2FA9' },
+    }],
+  });
+  const result = deleteVideoClip(project, 'first');
+  assert.ok(result);
+  assert.deepEqual(result.project.captions.map(({ id, text, startMs, styleOverride }) => ({ id, text, startMs, styleOverride })), [{
+    id: 'manual-second',
+    text: 'My exact edit',
+    startMs: 500,
+    styleOverride: { textColor: '#FF2FA9' },
+  }]);
+});
+
+test('legacy timeline words recover canonical source time and survive trim restoration', () => {
+  const legacyClip = clip({ id: 'legacy', sourceStartMs: 1_000, sourceEndMs: 4_000, availableSourceStartMs: 0, availableSourceEndMs: 4_000 });
+  const legacyWords = [{ id: 'spoken', text: 'recoverable', startMs: 300, endMs: 800 }];
+  const recovered = recoverCanonicalSourceWords([legacyClip], legacyWords);
+  assert.deepEqual(recovered.source.map(({ id, startMs, endMs }) => [id, startMs, endMs]), [['spoken', 1_300, 1_800]]);
+  const project = projectFixture({
+    clips: [legacyClip],
+    transcription: {
+      language: 'en',
+      modelId: 'fast',
+      words: legacyWords,
+      sourceResults: {
+        source: { language: 'en', modelId: 'fast', generatedAt: '2026-01-01T00:00:00.000Z', words: recovered.source },
+      },
+    },
+    captions: [{ id: 'legacy-caption', text: 'recoverable', startMs: 300, endMs: 800, wordIds: ['spoken'] }],
+  });
+  const hidden = trimVideoClip(project, 'legacy', 'start', 2_000);
+  assert.ok(hidden);
+  assert.equal(visibleTimelineCaptions(hidden.project.captions).length, 0);
+  const restored = trimVideoClip(hidden.project, 'legacy', 'start', 1_000);
+  assert.ok(restored);
+  assert.equal(restored.project.transcription.words[0].text, 'recoverable');
+  assert.equal(visibleTimelineCaptions(restored.project.captions)[0].text, 'recoverable');
+});
+
+test('minimum clip duration is invariant across slow and fast playback rates', () => {
+  const slow = projectFixture({ clips: [clip({ id: 'slow', sourceEndMs: 1_000, availableSourceEndMs: 1_000, playbackRate: 0.25 })] });
+  assert.ok(trimVideoClip(slow, 'slow', 'end', 30));
+  assert.equal(trimVideoClip(slow, 'slow', 'end', 29).project.clips[0].sourceEndMs, 30);
+  const fast = projectFixture({ clips: [clip({ id: 'fast', sourceEndMs: 4_000, availableSourceEndMs: 4_000, playbackRate: 4 })] });
+  assert.ok(splitVideoClip(fast, 'fast', 120, 'left-fast', 'right-fast'));
+  assert.equal(splitVideoClip(fast, 'fast', 119, 'bad-left', 'bad-right'), null);
 });
 
 test('numeric camera filenames become human-readable project names', () => {
@@ -208,16 +523,57 @@ test('script caption edits commit atomically and preserve caption invariants', (
   assert.equal(applyCaptionTextChanges(next, { first: '   ' }), next);
 });
 
+test('Enter splits a script caption at a spoken-word boundary and Backspace merges it again', () => {
+  const words = [
+    { id: 'clip-one', text: 'one', startMs: 0, endMs: 400 },
+    { id: 'clip-two', text: 'two', startMs: 500, endMs: 900 },
+    { id: 'clip-three', text: 'three', startMs: 1_000, endMs: 1_400 },
+    { id: 'clip-four', text: 'four', startMs: 1_500, endMs: 1_900 },
+  ];
+  const captions = [{
+    id: 'sentence',
+    text: 'one two three four',
+    textMode: 'automatic',
+    startMs: 0,
+    endMs: 2_000,
+    wordIds: words.map((word) => word.id),
+    timelineVisible: true,
+    sourceAnchor: { clipId: 'clip', sourceStartMs: 0, sourceEndMs: 2_000, wordIds: words.map((word) => word.id) },
+    styleOverride: { textColor: '#19D98B' },
+  }];
+  const split = splitCaptionScriptBlock(captions, 'sentence', 'one two'.length, words, 'sentence-right');
+  assert.ok(split);
+  assert.deepEqual(split.captions.map(({ id, text, startMs, endMs, wordIds }) => ({ id, text, startMs, endMs, wordIds })), [
+    { id: 'sentence', text: 'one two', startMs: 0, endMs: 950, wordIds: ['clip-one', 'clip-two'] },
+    { id: 'sentence-right', text: 'three four', startMs: 950, endMs: 2_000, wordIds: ['clip-three', 'clip-four'] },
+  ]);
+  assert.equal(split.captions[1].styleOverride.textColor, '#19D98B');
+  const merged = mergeCaptionScriptBlock(split.captions, 'sentence-right');
+  assert.ok(merged && !('blockedByVideoCut' in merged));
+  assert.deepEqual(merged.captions.map(({ id, text, startMs, endMs }) => ({ id, text, startMs, endMs })), [
+    { id: 'sentence', text: 'one two three four', startMs: 0, endMs: 2_000 },
+  ]);
+});
+
+test('script captions never merge across a hard video cut', () => {
+  const captions = [
+    { id: 'left', text: 'left', startMs: 0, endMs: 500, wordIds: [], sourceAnchor: { clipId: 'a', sourceStartMs: 0, sourceEndMs: 500, wordIds: [] } },
+    { id: 'right', text: 'right', startMs: 500, endMs: 1_000, wordIds: [], sourceAnchor: { clipId: 'b', sourceStartMs: 0, sourceEndMs: 500, wordIds: [] } },
+  ];
+  assert.deepEqual(mergeCaptionScriptBlock(captions, 'right'), { blockedByVideoCut: true });
+});
+
 test('caption editing opens the full timestamped script and keeps text-layer editing isolated', () => {
   const editor = readFileSync(new URL('../src/app/editor.tsx', import.meta.url), 'utf8');
   const scriptEditor = readFileSync(new URL('../src/components/editor/script-editor.tsx', import.meta.url), 'utf8');
   assert.match(editor, /<ScriptEditor/);
-  assert.match(editor, /setCaptionTexts\(before, changes\)/);
+  assert.match(editor, /replaceVisibleCaptionScript\(before, captions\)/);
   assert.match(editor, /<EditTextLayerModal/);
   assert.match(scriptEditor, /<FlatList/);
   assert.match(scriptEditor, /formatTimestamp\(item\.startMs\)/);
-  assert.match(scriptEditor, /Tap any line to edit it/);
-  assert.match(scriptEditor, /onSave\(drafts\)/);
+  assert.match(scriptEditor, /Press Enter between words/);
+  assert.match(scriptEditor, /Backspace/);
+  assert.match(scriptEditor, /onSave\(draftCaptions\)/);
 });
 
 test('timeline keeps a fixed playhead, scrubs its content, renders a ruler, and offers an append-video control', () => {
@@ -227,6 +583,24 @@ test('timeline keeps a fixed playhead, scrubs its content, renders a ruler, and 
   assert.match(timeline, /onScrollBeginDrag/);
   assert.match(timeline, /TimelineRuler/);
   assert.match(timeline, /onAddVideos/);
+});
+
+test('video transport has one source of runtime truth and advances across native end events', () => {
+  const editor = readFileSync(new URL('../src/app/editor.tsx', import.meta.url), 'utf8');
+  const controller = readFileSync(new URL('../src/hooks/use-timeline-video-controller.ts', import.meta.url), 'utf8');
+  assert.equal((editor.match(/<VideoView/g) ?? []).length, 1);
+  assert.doesNotMatch(editor, /currentMs\s*<=\s*50|activeSourceIdRef|sourceLoadVersionRef/);
+  assert.match(editor, /surfaceType="textureView"/);
+  assert.match(editor, /useExoShutter/);
+  assert.match(controller, /playIntentRef/);
+  assert.match(controller, /desiredRef/);
+  assert.match(controller, /processingRef/);
+  assert.match(controller, /initialSourceRef/);
+  assert.match(controller, /generation !== generationRef\.current/);
+  assert.match(controller, /if \(!mountedRef\.current\) return/);
+  assert.match(controller, /synchronizeProject[\s\S]*desiredRef\.current/);
+  assert.match(controller, /'playToEnd'/);
+  assert.doesNotMatch(controller, /player\.playing/);
 });
 
 test('the editor tool panel scrolls independently above a fixed mode bar', () => {
@@ -250,11 +624,17 @@ test('emoji reactions change with the spoken word', () => {
 });
 
 function clip(overrides = {}) {
+  const sourceStartMs = overrides.sourceStartMs ?? 0;
+  const sourceEndMs = overrides.sourceEndMs ?? 1_000;
   return {
     id: 'clip',
     sourceId: 'source',
-    sourceStartMs: 0,
-    sourceEndMs: 1_000,
+    availableSourceStartMs: overrides.availableSourceStartMs ?? sourceStartMs,
+    availableSourceEndMs: overrides.availableSourceEndMs ?? sourceEndMs,
+    sourceStartMs,
+    sourceEndMs,
+    gapBeforeMs: 0,
+    gapAfterMs: 0,
     playbackRate: 1,
     volume: 1,
     muted: false,
@@ -262,4 +642,34 @@ function clip(overrides = {}) {
     fadeOutMs: 0,
     ...overrides,
   };
+}
+
+function projectFixture(overrides = {}) {
+  const base = {
+    schemaVersion: 2,
+    id: 'project',
+    name: 'Project',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    lifecycle: { status: 'draft' },
+    sources: [{
+      id: 'source',
+      uri: 'content://video',
+      storageMode: 'linked',
+      displayName: 'Video',
+      durationMs: 4_000,
+      width: 1080,
+      height: 1920,
+      rotation: 0,
+    }],
+    transcription: { language: 'en', modelId: 'fast', words: [], sourceResults: {} },
+    captions: [],
+    projectStyle: {},
+    layers: [{ id: 'captions', kind: 'captions', name: 'Captions', visible: true }],
+    clips: [clip({ id: 'main', sourceEndMs: 4_000, availableSourceEndMs: 4_000 })],
+    canvas: { preset: 'source', aspectWidth: 9, aspectHeight: 16, backgroundColor: '#000000' },
+    videoTransform: { fit: 'fit', position: { x: 0.5, y: 0.5 }, scale: 1, rotation: 0 },
+    export: { resolution: '1080p', format: 'mp4', burnCaptions: true },
+  };
+  return { ...base, ...overrides };
 }

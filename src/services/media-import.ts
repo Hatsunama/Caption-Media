@@ -1,6 +1,7 @@
 import * as DocumentPicker from 'expo-document-picker';
 
 import CaptionMedia from '../../modules/caption-media/src/CaptionMediaModule';
+import { MINIMUM_CLIP_TIMELINE_MS } from '@/lib/video-timeline';
 import { deleteProjectOwnedFiles, generateProjectThumbnail, storeProjectImage } from '@/services/project-media';
 import { requireFreeSpace } from '@/services/storage-policy';
 import type { ProjectVideoSource } from '@/types/project';
@@ -50,7 +51,9 @@ export async function pickLinkedVideos(
         throw new Error(`Android did not grant lasting access to ${asset.name}. Select it from Files or Photos and try again.`);
       }
       const info = await CaptionMedia.getMediaInfo(asset.uri);
-      if (info.durationMs <= 0) throw new Error(`${asset.name} is not a readable video.`);
+      if (info.durationMs < MINIMUM_CLIP_TIMELINE_MS) {
+        throw new Error(`${asset.name} is shorter than ${MINIMUM_CLIP_TIMELINE_MS / 1000} seconds and cannot be edited reliably.`);
+      }
       sources.push({
         id: sourceId,
         uri: asset.uri,
