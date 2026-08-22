@@ -21,6 +21,14 @@ export function timelineZoomPercent(scale: number, minimum: number) {
   return Math.round(clamp(normalized, 0, 1) * 100);
 }
 
+export function timelineScrollOffset(timeMs: number, durationMs: number, trackWidth: number) {
+  return clamp(timeMs / Math.max(1, durationMs), 0, 1) * Math.max(1, trackWidth);
+}
+
+export function timelineTimeAtScroll(offset: number, durationMs: number, trackWidth: number) {
+  return clamp(offset / Math.max(1, trackWidth), 0, 1) * Math.max(1, durationMs);
+}
+
 export function clampTimelineScale(scale: number, minimum: number) {
   return clamp(scale, minimum, MAX_TIMELINE_PIXELS_PER_SECOND);
 }

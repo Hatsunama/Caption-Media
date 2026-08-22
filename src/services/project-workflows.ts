@@ -1,4 +1,5 @@
 import { createCaptionProject, createVideoClip } from '@/lib/project-factory';
+import type { TranscriptionModel } from '@/lib/model-catalog';
 import { humanVideoName } from '@/lib/project-presentation';
 import { deleteProjectRecord, getProject, listProjects, saveProject } from '@/services/database';
 import { pickLinkedVideos, type MediaImportProgress } from '@/services/media-import';
@@ -55,9 +56,10 @@ export async function appendVideosToProject(
 
 export async function generateAndSaveProjectCaptions(
   project: CaptionProject,
+  modelId: TranscriptionModel['id'],
   onProgress?: (progress: TranscriptionProgress) => void,
 ) {
-  const generated = await generateProjectCaptions(project, onProgress, saveProject);
+  const generated = await generateProjectCaptions(project, modelId, onProgress, saveProject);
   await saveProject(generated);
   return generated;
 }

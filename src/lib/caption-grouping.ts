@@ -56,7 +56,20 @@ export function groupWordsIntoCaptions(
     startMs: group[0].startMs,
     endMs: group.at(-1)!.endMs,
     wordIds: group.map((word) => word.id),
+    textMode: 'automatic',
+    timelineVisible: true,
   }));
+}
+
+export function groupTimelineWordsByClip(
+  words: WordToken[],
+  clipIds: string[],
+  options: CaptionGroupingOptions = DEFAULT_GROUPING_OPTIONS,
+) {
+  return clipIds.flatMap((clipId) => groupWordsIntoCaptions(
+    words.filter((word) => word.id.startsWith(`${clipId}-`)),
+    options,
+  ).map((caption, index) => ({ ...caption, id: `caption-${clipId}-${index + 1}` })));
 }
 
 export function joinWords(words: WordToken[]): string {

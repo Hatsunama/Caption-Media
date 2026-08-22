@@ -114,6 +114,14 @@ export type CaptionBlock = {
   startMs: number;
   endMs: number;
   wordIds: Identifier[];
+  textMode?: 'automatic' | 'manual';
+  timelineVisible?: boolean;
+  sourceAnchor?: {
+    clipId: Identifier;
+    sourceStartMs: number;
+    sourceEndMs: number;
+    wordIds: Identifier[];
+  };
   styleOverride?: CaptionStylePatch;
 };
 
@@ -122,6 +130,12 @@ export type CaptionsVisualLayer = {
   kind: 'captions';
   name: string;
   visible: boolean;
+};
+
+export type LayerSourceAnchor = {
+  clipId: Identifier;
+  sourceStartMs: number;
+  sourceEndMs: number;
 };
 
 export type TextVisualLayer = {
@@ -133,6 +147,8 @@ export type TextVisualLayer = {
   startMs: number;
   endMs: number;
   style: CaptionStyle;
+  sourceAnchors?: LayerSourceAnchor[];
+  timelineVisible?: boolean;
 };
 
 export type ImageVisualLayer = {
@@ -147,6 +163,8 @@ export type ImageVisualLayer = {
   box: { width: number; height: number };
   rotation: number;
   opacity: number;
+  sourceAnchors?: LayerSourceAnchor[];
+  timelineVisible?: boolean;
 };
 
 export type VisualLayer = CaptionsVisualLayer | TextVisualLayer | ImageVisualLayer;
@@ -168,8 +186,12 @@ export type ProjectVideoSource = {
 export type VideoClip = {
   id: Identifier;
   sourceId: Identifier;
+  availableSourceStartMs: number;
+  availableSourceEndMs: number;
   sourceStartMs: number;
   sourceEndMs: number;
+  gapBeforeMs: number;
+  gapAfterMs: number;
   playbackRate: number;
   volume: number;
   muted: boolean;

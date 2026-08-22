@@ -2,7 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanResponder, Pressable, ScrollView, Text, View } from 'react-native';
 
 import { packTimelineLanes } from '@/lib/timeline-layout';
-import { clampTimelineScale, minimumTimelineScale, timelineTickInterval, timelineWidth, timelineZoomPercent } from '@/lib/timeline-scale';
+import { previewVideoClipTrim } from '@/lib/project-editor';
+import {
+  clampTimelineScale,
+  minimumTimelineScale,
+  timelineScrollOffset,
+  timelineTickInterval,
+  timelineTimeAtScroll,
+  timelineWidth,
+  timelineZoomPercent,
+} from '@/lib/timeline-scale';
 import { buildClipTimeline } from '@/lib/video-timeline';
 import type { CaptionBlock, VideoClip, VisualLayer } from '@/types/project';
 
@@ -17,15 +26,16 @@ export function LayerTimeline(props: {
   layers: VisualLayer[];
   captions: CaptionBlock[];
   currentMs: number;
-  isPlaying: boolean;
   selectedLayerId: string;
   selectedCaptionId?: string;
   selectedClipId?: string;
   onSeek: (timeMs: number) => void;
+  onScrubStart: () => void;
   onSelectLayer: (id: string) => void;
   onSelectCaption: (caption: CaptionBlock) => void;
   onSelectClip: (clipId: string, timelineStartMs: number) => void;
-  onTrimClip: (clipId: string, edge: 'start' | 'end', amountMs: number) => void;
+  onTrimClip: (clipId: string, edge: 'start' | 'end', targetSourceMs: number) => void;
+  onSetClipGap: (clipId: string, gapMs: number, edge?: 'before' | 'after') => void;
   onLayerTimingChange: (layerId: string, startMs: number, endMs: number) => void;
   onCaptionTimingChange: (captionId: string, startMs: number, endMs: number) => void;
   onTimingChangeStart: () => void;
@@ -34,9 +44,15 @@ export function LayerTimeline(props: {
   onDeleteLayer: (layerId: string) => void;
   onAddVideos: () => void;
 }) {
-  const duration = Math.max(1, props.durationMs);
   const horizontalRef = useRef<ScrollView>(null);
   const [viewportWidth, setViewportWidth] = useState(360);
+  const [clipPreview, setClipPreview] = useState<VideoClip>();
+  const previewClips = useMemo(
+    () => clipPreview ? props.clips.map((clip) => clip.id === clipPreview.id ? clipPreview : clip) : props.clips,
+    [clipPreview, props.clips],
+  );
+  const clipPositions = useMemo(() => buildClipTimeline(previewClips), [previewClips]);
+  const duration = Math.max(1, props.durationMs, clipPositions.at(-1)?.afterGapEndMs ?? 0);
   const minimumScale = minimumTimelineScale(duration, Math.max(1, viewportWidth - LABEL_WIDTH));
   const [pixelsPerSecond, setPixelsPerSecond] = useState(() => Math.max(16, minimumScale));
   const effectiveScale = clampTimelineScale(pixelsPerSecond, minimumScale);
@@ -44,6 +60,10 @@ export function LayerTimeline(props: {
   const zoomPercent = timelineZoomPercent(effectiveScale, minimumScale);
   const [zoomNotice, setZoomNotice] = useState<number>();
   const zoomTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrubEndTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrubbingRef = useRef(false);
+  const scrollXRef = useRef(0);
+  const lastScrubMsRef = useRef(-1);
   const pinch = useRef({ distance: 0, scale: effectiveScale });
   const captionLayout = useMemo(() => packTimelineLanes(props.captions), [props.captions]);
   const captionRowHeight = captionLayout.laneCount * LANE_HEIGHT + 10;
@@ -51,20 +71,34 @@ export function LayerTimeline(props: {
     (sum, layer) => sum + (layer.kind === 'captions' ? captionRowHeight : 46),
     0,
   );
-  const clipPositions = useMemo(() => buildClipTimeline(props.clips), [props.clips]);
+  const leadingPadding = Math.max(0, viewportWidth / 2 - LABEL_WIDTH);
+  const trailingPadding = viewportWidth / 2;
+  const scrollContentWidth = leadingPadding + LABEL_WIDTH + trackWidth + trailingPadding;
 
   useEffect(() => () => {
     if (zoomTimer.current) clearTimeout(zoomTimer.current);
+    if (scrubEndTimer.current) clearTimeout(scrubEndTimer.current);
   }, []);
 
   useEffect(() => {
-    if (!props.isPlaying) return;
-    const playhead = LABEL_WIDTH + currentX(props.currentMs, duration, trackWidth);
-    horizontalRef.current?.scrollTo({
-      x: clamp(playhead - viewportWidth / 2, 0, Math.max(0, LABEL_WIDTH + trackWidth - viewportWidth)),
-      animated: false,
-    });
-  }, [duration, props.currentMs, props.isPlaying, trackWidth, viewportWidth]);
+    if (scrubbingRef.current) return;
+    const x = timelineScrollOffset(props.currentMs, duration, trackWidth);
+    scrollXRef.current = x;
+    horizontalRef.current?.scrollTo({ x, animated: false });
+  }, [duration, props.currentMs, trackWidth, viewportWidth]);
+
+  const seekFromScroll = (offset: number, force = false) => {
+    const timeMs = timelineTimeAtScroll(offset, duration, trackWidth);
+    if (!force && Math.abs(timeMs - lastScrubMsRef.current) < 32) return;
+    lastScrubMsRef.current = timeMs;
+    props.onSeek(timeMs);
+  };
+
+  const finishScrub = () => {
+    if (scrubEndTimer.current) clearTimeout(scrubEndTimer.current);
+    scrubbingRef.current = false;
+    seekFromScroll(scrollXRef.current, true);
+  };
 
   const updateZoom = (next: number) => {
     const clamped = clampTimelineScale(next, minimumScale);
@@ -94,13 +128,82 @@ export function LayerTimeline(props: {
         <Text style={{ minWidth: 118, color: '#D7DDE5', textAlign: 'center', fontSize: 11, fontWeight: '800' }}>TIMELINE {zoomPercent}%</Text>
         <ZoomButton label="+" onPress={() => updateZoom(effectiveScale * 1.5)} />
       </View>
-      <ScrollView ref={horizontalRef} horizontal nestedScrollEnabled showsHorizontalScrollIndicator contentContainerStyle={{ width: LABEL_WIDTH + trackWidth }}>
-        <View style={{ width: LABEL_WIDTH + trackWidth, height: '100%' }}>
+      <ScrollView
+        ref={horizontalRef}
+        horizontal
+        nestedScrollEnabled
+        decelerationRate="fast"
+        scrollEventThrottle={32}
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ width: scrollContentWidth }}
+        onScrollBeginDrag={() => {
+          if (scrubEndTimer.current) clearTimeout(scrubEndTimer.current);
+          scrubbingRef.current = true;
+          props.onScrubStart();
+        }}
+        onScroll={(event) => {
+          const x = clamp(event.nativeEvent.contentOffset.x, 0, trackWidth);
+          scrollXRef.current = x;
+          if (scrubbingRef.current) seekFromScroll(x);
+        }}
+        onScrollEndDrag={() => {
+          if (scrubEndTimer.current) clearTimeout(scrubEndTimer.current);
+          scrubEndTimer.current = setTimeout(finishScrub, 90);
+        }}
+        onMomentumScrollBegin={() => {
+          if (scrubEndTimer.current) clearTimeout(scrubEndTimer.current);
+          scrubbingRef.current = true;
+        }}
+        onMomentumScrollEnd={finishScrub}>
+        <View style={{ width: LABEL_WIDTH + trackWidth, height: '100%', marginLeft: leadingPadding }}>
           <TimelineRuler durationMs={duration} trackWidth={trackWidth} pixelsPerSecond={effectiveScale} />
           <ScrollView style={{ marginTop: RULER_HEIGHT }} contentContainerStyle={{ paddingVertical: 1 }} nestedScrollEnabled>
             <TimelineRow label="VIDEO" labelColor="#DFFF35" selected={Boolean(props.selectedClipId)} trackWidth={trackWidth} height={46} onPressTrack={(x) => props.onSeek(x / trackWidth * duration)} controls={<Text style={{ color: '#6F7985', fontSize: 8 }}>{props.clips.length} CLIP{props.clips.length === 1 ? '' : 'S'}</Text>}>
-              {clipPositions.map(({ clip, startMs, endMs }, index) => (
-                <VideoClipBlock key={clip.id} label={`CLIP ${index + 1}`} startMs={startMs} endMs={endMs} durationMs={duration} trackWidth={trackWidth} selected={props.selectedClipId === clip.id} color={index % 2 ? '#38404A' : '#46515D'} onPress={() => props.onSelectClip(clip.id, startMs)} onTrim={(edge, amountMs) => props.onTrimClip(clip.id, edge, amountMs)} />
+              {clipPositions.map(({ clip, gapStartMs, startMs, endMs, afterGapEndMs }, index) => (
+                <View key={clip.id} style={{ position: 'absolute', inset: 0 }} pointerEvents="box-none">
+                  {startMs > gapStartMs ? (
+                    <VideoGapBlock
+                      startMs={gapStartMs}
+                      endMs={startMs}
+                      durationMs={duration}
+                      trackWidth={trackWidth}
+                      onPress={() => props.onSelectClip(clip.id, startMs)}
+                      onRemove={() => props.onSetClipGap(clip.id, 0)}
+                    />
+                  ) : null}
+                  {afterGapEndMs > endMs ? (
+                    <VideoGapBlock
+                      startMs={endMs}
+                      endMs={afterGapEndMs}
+                      durationMs={duration}
+                      trackWidth={trackWidth}
+                      accessibilityLabel={`Empty gap after ${formatGap(afterGapEndMs - endMs)}. Tap to select the preceding clip.`}
+                      onPress={() => props.onSelectClip(clip.id, endMs)}
+                      onRemove={() => props.onSetClipGap(clip.id, 0, 'after')}
+                    />
+                  ) : null}
+                  <VideoClipBlock
+                    clip={clip}
+                    label={`CLIP ${index + 1}`}
+                    startMs={startMs}
+                    endMs={endMs}
+                    durationMs={duration}
+                    trackWidth={trackWidth}
+                    selected={props.selectedClipId === clip.id}
+                    color={index % 2 ? '#38404A' : '#46515D'}
+                    onPress={() => props.onSelectClip(clip.id, startMs)}
+                    onTrimPreview={(edge, targetSourceMs) => setClipPreview(previewVideoClipTrim(clip, edge, targetSourceMs))}
+                    onTrimCommit={(edge, targetSourceMs) => {
+                      setClipPreview(undefined);
+                      props.onTrimClip(clip.id, edge, targetSourceMs);
+                    }}
+                    onGapPreview={(gapBeforeMs) => setClipPreview({ ...clip, gapBeforeMs })}
+                    onGapCommit={(gapBeforeMs) => {
+                      setClipPreview(undefined);
+                      props.onSetClipGap(clip.id, gapBeforeMs);
+                    }}
+                  />
+                </View>
               ))}
             </TimelineRow>
             {props.layers.map((layer, layerIndex) => {
@@ -132,9 +235,11 @@ export function LayerTimeline(props: {
               );
             })}
           </ScrollView>
-          <View pointerEvents="none" style={{ position: 'absolute', left: LABEL_WIDTH + currentX(props.currentMs, duration, trackWidth), top: RULER_HEIGHT, bottom: 0, width: 2, backgroundColor: '#FF5267' }} />
         </View>
       </ScrollView>
+      <View pointerEvents="none" style={{ position: 'absolute', left: '50%', top: 36, bottom: 0, width: 2, marginLeft: -1, backgroundColor: '#FF5267' }}>
+        <View style={{ position: 'absolute', left: -7, top: 0, width: 0, height: 0, borderLeftWidth: 8, borderRightWidth: 8, borderTopWidth: 11, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#FF5267' }} />
+      </View>
       <Pressable accessibilityRole="button" accessibilityLabel="Add videos to the end of the timeline" onPress={props.onAddVideos} style={{ position: 'absolute', right: 10, top: RULER_HEIGHT + 45, width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20, borderWidth: 2, borderColor: '#11140C', backgroundColor: '#DFFF35' }}>
         <Text style={{ color: '#11140C', fontSize: 27, fontWeight: '700', lineHeight: 30 }}>+</Text>
       </Pressable>
@@ -149,18 +254,150 @@ function TimelineRuler(props: { durationMs: number; trackWidth: number; pixelsPe
   return <View style={{ position: 'absolute', left: 0, top: 0, width: LABEL_WIDTH + props.trackWidth, height: RULER_HEIGHT, borderBottomWidth: 1, borderBottomColor: '#2B333D' }}><Text style={{ position: 'absolute', left: 8, top: 8, color: '#7D8794', fontSize: 8, fontWeight: '800' }}>TIME</Text>{Array.from({ length: tickCount + 1 }, (_, index) => { const timeMs = index * interval; const left = LABEL_WIDTH + timeMs / props.durationMs * props.trackWidth; return <View key={timeMs} style={{ position: 'absolute', left, top: 0, height: RULER_HEIGHT, borderLeftWidth: 1, borderLeftColor: '#64707D' }}><Text style={{ marginLeft: 4, marginTop: 5, color: '#AEB7C2', fontSize: 8, fontVariant: ['tabular-nums'] }}>{formatRulerTime(timeMs, interval)}</Text></View>; })}</View>;
 }
 
-function VideoClipBlock(props: { label: string; startMs: number; endMs: number; durationMs: number; trackWidth: number; selected: boolean; color: string; onPress: () => void; onTrim: (edge: 'start' | 'end', amountMs: number) => void }) {
-  const [preview, setPreview] = useState({ startInsetMs: 0, endInsetMs: 0 });
+function VideoClipBlock(props: {
+  clip: VideoClip;
+  label: string;
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+  trackWidth: number;
+  selected: boolean;
+  color: string;
+  onPress: () => void;
+  onTrimPreview: (edge: 'start' | 'end', targetSourceMs: number) => void;
+  onTrimCommit: (edge: 'start' | 'end', targetSourceMs: number) => void;
+  onGapPreview: (gapBeforeMs: number) => void;
+  onGapCommit: (gapBeforeMs: number) => void;
+}) {
   const clipDuration = Math.max(120, props.endMs - props.startMs);
-  return <Pressable onPress={props.onPress} style={{ position: 'absolute', left: (props.startMs + preview.startInsetMs) / props.durationMs * props.trackWidth, width: Math.max(2, (clipDuration - preview.startInsetMs - preview.endInsetMs) / props.durationMs * props.trackWidth - 2), top: 3, bottom: 3, justifyContent: 'center', paddingHorizontal: 7, borderRadius: 6, borderWidth: props.selected ? 2 : 0, borderColor: '#DFFF35', backgroundColor: props.color }}><Text numberOfLines={1} style={{ color: '#F7F8FA', fontSize: 8, fontWeight: '800' }}>{props.label}</Text>{props.selected ? <><VideoTrimGrip side="start" trackWidth={props.trackWidth} timelineDurationMs={props.durationMs} maxTrimMs={clipDuration - preview.endInsetMs - 120} onPreview={(amount) => setPreview((current) => ({ ...current, startInsetMs: amount }))} onCommit={(amount) => { setPreview({ startInsetMs: 0, endInsetMs: 0 }); props.onTrim('start', amount); }} /><VideoTrimGrip side="end" trackWidth={props.trackWidth} timelineDurationMs={props.durationMs} maxTrimMs={clipDuration - preview.startInsetMs - 120} onPreview={(amount) => setPreview((current) => ({ ...current, endInsetMs: amount }))} onCommit={(amount) => { setPreview({ startInsetMs: 0, endInsetMs: 0 }); props.onTrim('end', amount); }} /></> : null}</Pressable>;
+  return (
+    <View
+      style={{
+        position: 'absolute',
+        left: props.startMs / props.durationMs * props.trackWidth,
+        width: Math.max(2, clipDuration / props.durationMs * props.trackWidth - 2),
+        top: 3,
+        bottom: 3,
+        justifyContent: 'center',
+        paddingHorizontal: 16,
+        borderRadius: 6,
+        borderWidth: props.selected ? 2 : 0,
+        borderColor: '#DFFF35',
+        backgroundColor: props.color,
+      }}>
+      <Text pointerEvents="none" numberOfLines={1} style={{ color: '#F7F8FA', fontSize: 8, fontWeight: '800' }}>{props.label}</Text>
+      <VideoMoveGrip {...props} />
+      {props.selected ? (
+        <>
+          <VideoTrimGrip side="start" {...props} />
+          <VideoTrimGrip side="end" {...props} />
+        </>
+      ) : null}
+    </View>
+  );
 }
 
-function VideoTrimGrip(props: { side: 'start' | 'end'; trackWidth: number; timelineDurationMs: number; maxTrimMs: number; onPreview: (amountMs: number) => void; onCommit: (amountMs: number) => void }) {
+function VideoTrimGrip(props: Parameters<typeof VideoClipBlock>[0] & { side: 'start' | 'end' }) {
   const propsRef = useRef(props);
   propsRef.current = props;
-  const amountRef = useRef(0);
-  const responder = useMemo(() => PanResponder.create({ onStartShouldSetPanResponder: () => true, onMoveShouldSetPanResponder: () => true, onPanResponderGrant: () => { amountRef.current = 0; }, onPanResponderMove: (_event, gesture) => { const inwardPixels = propsRef.current.side === 'start' ? gesture.dx : -gesture.dx; const amount = clamp(inwardPixels / Math.max(1, propsRef.current.trackWidth) * propsRef.current.timelineDurationMs, 0, propsRef.current.maxTrimMs); amountRef.current = amount; propsRef.current.onPreview(amount); }, onPanResponderRelease: () => propsRef.current.onCommit(amountRef.current), onPanResponderTerminate: () => propsRef.current.onCommit(amountRef.current) }), []);
-  return <View {...responder.panHandlers} style={{ position: 'absolute', [props.side === 'start' ? 'left' : 'right']: -9, top: -3, bottom: -3, width: 24, borderRadius: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: '#DFFF35' }}><View style={{ width: 3, height: 18, borderRadius: 2, backgroundColor: '#172007' }} /></View>;
+  const targetRef = useRef(props.side === 'start' ? props.clip.sourceStartMs : props.clip.sourceEndMs);
+  const initialClipRef = useRef(props.clip);
+  const responder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: () => {
+      propsRef.current.onPress();
+      initialClipRef.current = propsRef.current.clip;
+      targetRef.current = propsRef.current.side === 'start'
+        ? initialClipRef.current.sourceStartMs
+        : initialClipRef.current.sourceEndMs;
+    },
+    onPanResponderMove: (_event, gesture) => {
+      const timelineDelta = gesture.dx / Math.max(1, propsRef.current.trackWidth) * propsRef.current.durationMs;
+      const sourceDelta = timelineDelta * initialClipRef.current.playbackRate;
+      const target = propsRef.current.side === 'start'
+        ? clamp(
+            initialClipRef.current.sourceStartMs + sourceDelta,
+            initialClipRef.current.availableSourceStartMs,
+            initialClipRef.current.sourceEndMs - 120 * initialClipRef.current.playbackRate,
+          )
+        : clamp(
+            initialClipRef.current.sourceEndMs + sourceDelta,
+            initialClipRef.current.sourceStartMs + 120 * initialClipRef.current.playbackRate,
+            initialClipRef.current.availableSourceEndMs,
+          );
+      targetRef.current = target;
+      propsRef.current.onTrimPreview(propsRef.current.side, target);
+    },
+    onPanResponderRelease: () => propsRef.current.onTrimCommit(propsRef.current.side, targetRef.current),
+    onPanResponderTerminate: () => propsRef.current.onTrimCommit(propsRef.current.side, targetRef.current),
+  }), []);
+  return (
+    <View
+      {...responder.panHandlers}
+      accessibilityRole="adjustable"
+      accessibilityLabel={`${props.side === 'start' ? 'Start' : 'End'} trim handle`}
+      style={{ position: 'absolute', [props.side === 'start' ? 'left' : 'right']: -9, top: -3, bottom: -3, width: 24, borderRadius: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: '#DFFF35' }}>
+      <View pointerEvents="none" style={{ width: 3, height: 18, borderRadius: 2, backgroundColor: '#172007' }} />
+    </View>
+  );
+}
+
+function VideoMoveGrip(props: Parameters<typeof VideoClipBlock>[0]) {
+  const propsRef = useRef(props);
+  propsRef.current = props;
+  const gapRef = useRef(props.clip.gapBeforeMs);
+  const initialGapRef = useRef(props.clip.gapBeforeMs);
+  const draggedRef = useRef(false);
+  const responder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: () => {
+      propsRef.current.onPress();
+      initialGapRef.current = propsRef.current.clip.gapBeforeMs;
+      gapRef.current = initialGapRef.current;
+      draggedRef.current = false;
+    },
+    onPanResponderMove: (_event, gesture) => {
+      if (Math.abs(gesture.dx) <= 6 || Math.abs(gesture.dx) <= Math.abs(gesture.dy)) return;
+      draggedRef.current = true;
+      const delta = gesture.dx / Math.max(1, propsRef.current.trackWidth) * propsRef.current.durationMs;
+      const gap = clamp(initialGapRef.current + delta, 0, 60 * 60_000);
+      gapRef.current = gap;
+      propsRef.current.onGapPreview(gap);
+    },
+    onPanResponderRelease: () => {
+      if (draggedRef.current) propsRef.current.onGapCommit(gapRef.current);
+    },
+    onPanResponderTerminate: () => {
+      if (draggedRef.current) propsRef.current.onGapCommit(gapRef.current);
+    },
+  }), []);
+  return (
+    <View
+      {...responder.panHandlers}
+      accessible
+      accessibilityRole="adjustable"
+      accessibilityLabel={`${props.label}. Tap to select. Drag horizontally to add or remove empty space before this clip.`}
+      style={{ position: 'absolute', left: props.selected ? 16 : 0, right: props.selected ? 16 : 0, top: 0, bottom: 0 }}
+    />
+  );
+}
+
+function VideoGapBlock(props: { startMs: number; endMs: number; durationMs: number; trackWidth: number; accessibilityLabel?: string; onPress: () => void; onRemove: () => void }) {
+  const gapMs = props.endMs - props.startMs;
+  return (
+    <Pressable
+      onPress={props.onPress}
+      accessibilityRole="button"
+      accessibilityLabel={props.accessibilityLabel ?? `Empty gap ${formatGap(gapMs)}. Tap to select the following clip.`}
+      style={{ position: 'absolute', left: props.startMs / props.durationMs * props.trackWidth, width: Math.max(4, gapMs / props.durationMs * props.trackWidth - 1), top: 3, bottom: 3, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderStyle: 'dashed', borderColor: '#8994A1', backgroundColor: '#20252B' }}>
+      <Text pointerEvents="none" numberOfLines={1} style={{ color: '#C5CDD6', fontSize: 7, fontWeight: '900' }}>GAP {formatGap(gapMs)}</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel="Remove this gap" hitSlop={6} onPress={props.onRemove} style={{ position: 'absolute', right: 2, top: 2 }}>
+        <Text style={{ color: '#FF7C8D', fontSize: 10, fontWeight: '900' }}>×</Text>
+      </Pressable>
+    </Pressable>
+  );
 }
 
 function TimelineRow(props: { label: string; labelColor: string; selected?: boolean; controls: React.ReactNode; children: React.ReactNode; onPressLabel?: () => void; onPressTrack?: (x: number) => void; trackWidth: number; height: number }) {
@@ -183,6 +420,6 @@ function TimingGrip(props: Parameters<typeof TimedBlock>[0] & { side: 'start' | 
 function TinyButton(props: { label: string; danger?: boolean; disabled?: boolean; onPress: () => void }) { return <Pressable disabled={props.disabled} onPress={props.onPress} hitSlop={5} style={{ opacity: props.disabled ? 0.25 : 1 }}><Text style={{ color: props.danger ? '#FF7C8D' : '#9FAAB6', fontSize: 11, fontWeight: '900' }}>{props.label}</Text></Pressable>; }
 function ZoomButton(props: { label: string; onPress: () => void }) { return <Pressable accessibilityRole="button" accessibilityLabel={props.label === '+' ? 'Zoom timeline in' : 'Zoom timeline out'} onPress={props.onPress} style={{ width: 42, height: 28, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: '#242B34' }}><Text style={{ color: '#DFFF35', fontSize: 20, fontWeight: '900' }}>{props.label}</Text></Pressable>; }
 function formatRulerTime(ms: number, intervalMs: number) { const minutes = Math.floor(ms / 60_000); const seconds = (ms % 60_000) / 1000; return intervalMs < 1000 ? `${minutes}:${seconds.toFixed(intervalMs < 500 ? 2 : 1).padStart(4, '0')}` : `${minutes}:${Math.floor(seconds).toString().padStart(2, '0')}`; }
+function formatGap(ms: number) { return `${(Math.max(0, ms) / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`; }
 function touchDistance(first?: { pageX: number; pageY: number }, second?: { pageX: number; pageY: number }) { if (!first || !second) return 0; return Math.hypot(first.pageX - second.pageX, first.pageY - second.pageY); }
-function currentX(currentMs: number, durationMs: number, width: number) { return clamp(currentMs / Math.max(1, durationMs), 0, 1) * width; }
 function clamp(value: number, min: number, max: number) { return Math.min(max, Math.max(min, value)); }

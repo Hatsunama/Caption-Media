@@ -1,24 +1,59 @@
-import type { CaptionProject, VideoClip, VisualLayer, WordToken } from '@/types/project';
+import type { CaptionBlock, CaptionProject, VideoClip, VisualLayer, WordToken } from '@/types/project';
 
-export type ClipTimelineEntry = { clip: VideoClip; startMs: number; endMs: number };
+export const MINIMUM_CLIP_TIMELINE_MS = 120;
+
+export type ClipTimelineEntry = {
+  clip: VideoClip;
+  gapStartMs: number;
+  startMs: number;
+  endMs: number;
+  afterGapEndMs: number;
+};
+
+export type TimelineSegment =
+  | { kind: 'gap'; startMs: number; endMs: number; next?: ClipTimelineEntry }
+  | { kind: 'clip'; entry: ClipTimelineEntry };
 
 export function buildClipTimeline(clips: VideoClip[]): ClipTimelineEntry[] {
   let cursor = 0;
   return clips.map((clip) => {
+    const gapStartMs = cursor;
+    cursor += validGap(clip.gapBeforeMs);
     const startMs = cursor;
     cursor += clipTimelineDuration(clip);
-    return { clip, startMs, endMs: cursor };
+    const endMs = cursor;
+    cursor += validGap(clip.gapAfterMs);
+    return { clip, gapStartMs, startMs, endMs, afterGapEndMs: cursor };
   });
 }
 
 export function timelineEntryAt(entries: ClipTimelineEntry[], timelineMs: number) {
   if (entries.length === 0) return undefined;
   return entries.find((entry) => timelineMs >= entry.startMs && timelineMs < entry.endMs)
-    ?? (timelineMs >= entries[entries.length - 1].endMs ? entries[entries.length - 1] : entries[0]);
+    ?? (timelineMs === entries[entries.length - 1].endMs ? entries[entries.length - 1] : undefined);
+}
+
+export function timelineSegmentAt(entries: ClipTimelineEntry[], timelineMs: number): TimelineSegment | undefined {
+  const clampedTime = Math.max(0, timelineMs);
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (clampedTime >= entry.gapStartMs && clampedTime < entry.startMs) {
+      return { kind: 'gap', startMs: entry.gapStartMs, endMs: entry.startMs, next: entry };
+    }
+    if (clampedTime >= entry.startMs && clampedTime < entry.endMs) return { kind: 'clip', entry };
+    if (clampedTime >= entry.endMs && clampedTime < entry.afterGapEndMs) {
+      const next = entries[index + 1];
+      return { kind: 'gap', startMs: entry.endMs, endMs: next?.startMs ?? entry.afterGapEndMs, next };
+    }
+  }
+  const last = entries.at(-1);
+  return last && clampedTime === last.afterGapEndMs
+    ? last.afterGapEndMs === last.endMs ? { kind: 'clip', entry: last } : undefined
+    : undefined;
 }
 
 export function totalClipDuration(clips: VideoClip[]) {
-  return clips.reduce((total, clip) => total + clipTimelineDuration(clip), 0);
+  return buildClipTimeline(clips).at(-1)?.afterGapEndMs ?? 0;
 }
 
 export function clipTimelineDuration(clip: VideoClip) {
@@ -66,11 +101,128 @@ export function mapSourceWordsToTimeline(
   return timelineWords;
 }
 
+export function recoverCanonicalSourceWords(clips: VideoClip[], timelineWords: WordToken[]) {
+  const entries = buildClipTimeline(clips);
+  const wordsBySource = new Map<string, Map<string, WordToken>>();
+  for (const word of timelineWords) {
+    const startEntry = timelineEntryAt(entries, word.startMs);
+    const endEntry = timelineEntryAt(entries, Math.max(word.startMs, word.endMs - 1));
+    if (!startEntry || !endEntry || startEntry.clip.sourceId !== endEntry.clip.sourceId) continue;
+    const prefix = `${startEntry.clip.id}-`;
+    const id = word.id.startsWith(prefix) ? word.id.slice(prefix.length) : word.id;
+    const canonical = {
+      ...word,
+      id,
+      startMs: sourceTimeAt(startEntry, word.startMs),
+      endMs: sourceTimeAt(endEntry, word.endMs),
+    };
+    const sourceWords = wordsBySource.get(startEntry.clip.sourceId) ?? new Map<string, WordToken>();
+    sourceWords.set(`${canonical.id}:${canonical.startMs}:${canonical.endMs}`, canonical);
+    wordsBySource.set(startEntry.clip.sourceId, sourceWords);
+  }
+  return Object.fromEntries([...wordsBySource].map(([sourceId, words]) => [
+    sourceId,
+    [...words.values()].sort((left, right) => left.startMs - right.startMs),
+  ]));
+}
+
+export function anchorCaptionsToClips(
+  captions: CaptionBlock[],
+  clips: VideoClip[],
+  timelineWords: WordToken[],
+) {
+  const entries = buildClipTimeline(clips);
+  const wordById = new Map(timelineWords.map((word) => [word.id, word]));
+  const reservedIds = new Set(captions.map((caption) => caption.id));
+  return captions.flatMap((caption) => {
+    if (caption.sourceAnchor) return [caption];
+    const owners = entries.map((entry) => {
+      if (caption.startMs >= entry.endMs || caption.endMs <= entry.startMs) return undefined;
+      const prefix = `${entry.clip.id}-`;
+      const wordIds = caption.wordIds.filter((wordId) => wordId.startsWith(prefix) && wordById.has(wordId));
+      if (wordIds.length === 0) {
+        for (const legacyWordId of caption.wordIds) {
+          const mappedId = `${prefix}${legacyWordId}`;
+          if (wordById.has(mappedId)) wordIds.push(mappedId);
+        }
+      }
+      return {
+        entry,
+        wordIds,
+        words: wordIds.map((wordId) => wordById.get(wordId)!).filter(Boolean),
+        startMs: Math.max(caption.startMs, entry.startMs),
+        endMs: Math.min(caption.endMs, entry.endMs),
+      };
+    }).filter((owner): owner is NonNullable<typeof owner> => Boolean(owner));
+    if (owners.length === 0) {
+      return [{ ...caption, textMode: caption.textMode ?? 'manual', timelineVisible: caption.timelineVisible ?? true }];
+    }
+    const completeAutomaticText = joinTimelineWords(owners.flatMap((owner) => owner.words));
+    const textMode = caption.textMode ?? (completeAutomaticText === caption.text ? 'automatic' : 'manual');
+    return owners.map((owner, index) => {
+      const automaticText = joinTimelineWords(owner.words);
+      const derivedId = index === 0 ? caption.id : reserveDerivedCaptionId(caption.id, owner.entry.clip.id, reservedIds);
+      const useAutomaticPiece = textMode === 'automatic' || (index > 0 && Boolean(automaticText));
+      return {
+        ...caption,
+        id: derivedId,
+        text: useAutomaticPiece && automaticText ? automaticText : caption.text,
+        textMode: useAutomaticPiece ? 'automatic' as const : textMode,
+        startMs: owner.startMs,
+        endMs: owner.endMs,
+        wordIds: owner.wordIds,
+        timelineVisible: owner.endMs - owner.startMs >= 80,
+        sourceAnchor: {
+          clipId: owner.entry.clip.id,
+          sourceStartMs: sourceTimeAt(owner.entry, owner.startMs),
+          sourceEndMs: sourceTimeAt(owner.entry, owner.endMs),
+          wordIds: owner.wordIds,
+        },
+      };
+    });
+  });
+}
+
+export function remapCaptionsToTimeline(
+  captions: CaptionBlock[],
+  clips: VideoClip[],
+  timelineWords: WordToken[],
+) {
+  const entryByClipId = new Map(buildClipTimeline(clips).map((entry) => [entry.clip.id, entry]));
+  const wordById = new Map(timelineWords.map((word) => [word.id, word]));
+  return captions.map((caption) => {
+    const anchor = caption.sourceAnchor;
+    if (!anchor) return caption;
+    const entry = entryByClipId.get(anchor.clipId);
+    if (!entry) return { ...caption, timelineVisible: false };
+    const visibleSourceStart = Math.max(anchor.sourceStartMs, entry.clip.sourceStartMs);
+    const visibleSourceEnd = Math.min(anchor.sourceEndMs, entry.clip.sourceEndMs);
+    if (visibleSourceEnd <= visibleSourceStart) return { ...caption, timelineVisible: false };
+    const startMs = timelineTimeAt(entry, visibleSourceStart);
+    const endMs = timelineTimeAt(entry, visibleSourceEnd);
+    const wordIds = anchor.wordIds.filter((wordId) => wordById.has(wordId));
+    const automaticText = joinTimelineWords(wordIds.map((wordId) => wordById.get(wordId)!).filter(Boolean));
+    return {
+      ...caption,
+      startMs,
+      endMs,
+      wordIds,
+      text: caption.textMode === 'automatic' && automaticText ? automaticText : caption.text,
+      timelineVisible: endMs - startMs >= 80,
+    };
+  });
+}
+
+export function visibleTimelineCaptions(captions: CaptionBlock[]) {
+  return captions.filter((caption) => caption.timelineVisible !== false);
+}
+
 export function rippleDelete(project: CaptionProject, cutStartMs: number, cutEndMs: number, clipId: string): CaptionProject {
   const rippled = rippleTimedContent(project, cutStartMs, cutEndMs);
   return {
     ...rippled,
     clips: project.clips.filter((clip) => clip.id !== clipId),
+    captions: rippled.captions.filter((caption) => caption.sourceAnchor?.clipId !== clipId),
   };
 }
 
@@ -87,7 +239,9 @@ export function rippleTimedContent(project: CaptionProject, cutStartMs: number, 
       const range = rippleRange(caption.startMs, caption.endMs, cutStartMs, cutEndMs);
       if (!range) return undefined;
       const wordIds = caption.wordIds.filter((id) => wordMap.has(id));
-      const text = wordIds.length > 0 ? wordIds.map((id) => wordMap.get(id)?.text).filter(Boolean).join(' ') : caption.text;
+      const text = caption.textMode === 'manual' || wordIds.length === 0
+        ? caption.text
+        : joinTimelineWords(wordIds.map((id) => wordMap.get(id)!).filter(Boolean));
       return { ...caption, ...range, wordIds, text };
     })
     .filter((caption): caption is NonNullable<typeof caption> => Boolean(caption));
@@ -155,6 +309,29 @@ function rippleRange(startMs: number, endMs: number, cutStartMs: number, cutEndM
 
 function validPlaybackRate(rate: number) {
   return clamp(Number.isFinite(rate) ? rate : 1, 0.25, 4);
+}
+
+function validGap(gapMs: number) {
+  return Math.max(0, Number.isFinite(gapMs) ? gapMs : 0);
+}
+
+function joinTimelineWords(words: WordToken[]) {
+  return words
+    .map((word) => word.text.trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .replace(/([([{])\s+/g, '$1')
+    .trim();
+}
+
+function reserveDerivedCaptionId(captionId: string, clipId: string, reservedIds: Set<string>) {
+  const base = `${captionId}-${clipId}`;
+  let candidate = base;
+  let suffix = 2;
+  while (reservedIds.has(candidate)) candidate = `${base}-${suffix++}`;
+  reservedIds.add(candidate);
+  return candidate;
 }
 
 function clamp(value: number, minimum: number, maximum: number) {
