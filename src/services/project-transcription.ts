@@ -1,10 +1,12 @@
 import { groupTimelineWordsByClip } from '@/lib/caption-grouping';
+import type { TranscriptionModel } from '@/lib/model-catalog';
 import { anchorCaptionsToClips, mapSourceWordsToTimeline } from '@/lib/video-timeline';
 import { transcribeVideoLocally, type TranscriptionProgress } from '@/services/transcription';
 import type { CaptionProject, SourceTranscription, WordToken } from '@/types/project';
 
 export async function generateProjectCaptions(
   project: CaptionProject,
+  modelId: TranscriptionModel['id'],
   onProgress?: (progress: TranscriptionProgress) => void,
   onCheckpoint?: (project: CaptionProject) => Promise<void>,
 ) {
@@ -16,11 +18,10 @@ export async function generateProjectCaptions(
     const sourceId = sourceIds[index];
     const source = sourceById.get(sourceId);
     if (!source) throw new Error('A timeline clip has lost its source video.');
-    if (sourceResults[sourceId]?.modelId === 'fast') continue;
     const result = await transcribeVideoLocally({
       projectId: `${project.id}-${sourceId}`,
       videoUri: source.uri,
-      modelId: 'fast',
+      modelId,
       durationMs: source.durationMs,
       language: 'en',
       onProgress: (progress) => onProgress?.({
@@ -32,7 +33,7 @@ export async function generateProjectCaptions(
     });
     sourceResults[sourceId] = {
       language: result.language,
-      modelId: 'fast',
+      modelId,
       generatedAt: new Date().toISOString(),
       words: result.words,
     };
@@ -56,7 +57,7 @@ export async function generateProjectCaptions(
     updatedAt: now,
     transcription: {
       language: sourceResults[sourceIds[0]]?.language ?? 'en',
-      modelId: 'fast',
+      modelId,
       generatedAt: now,
       words,
       sourceResults,

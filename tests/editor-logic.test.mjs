@@ -6,6 +6,7 @@ import { spokenAnimationClock } from '../src/lib/animation-timing.ts';
 import { reactionEmojis } from '../src/lib/animation-presets.ts';
 import { groupTimelineWordsByClip, groupWordsIntoCaptions } from '../src/lib/caption-grouping.ts';
 import { alignWordsToSpeech } from '../src/lib/speech-alignment.ts';
+import { coalesceWhisperWords } from '../src/lib/whisper-words.ts';
 import { packTimelineLanes } from '../src/lib/timeline-layout.ts';
 import { minimumTimelineScale, timelineScrollOffset, timelineTickInterval, timelineTimeAtScroll, timelineWidth } from '../src/lib/timeline-scale.ts';
 import { PREPARING_AUDIO_CUES } from '../src/lib/transcription-progress.ts';
@@ -64,6 +65,47 @@ test('downloaded transcription models are pinned by SHA-256', () => {
   assert.equal((modelCatalog.match(/sha256:/g) ?? []).length, 4);
   assert.match(transcription, /CaptionMedia\.sha256/);
   assert.match(transcription, /\.download/);
+});
+
+test('Whisper token pieces become human words without losing their timing', () => {
+  const words = coalesceWhisperWords([
+    { text: ' melan', t0: 100, t1: 120 },
+    { text: 'oma', t0: 120, t1: 145 },
+    { text: ',', t0: 145, t1: 150 },
+    { text: ' Key', t0: 160, t1: 180 },
+    { text: 'tr', t0: 180, t1: 195 },
+    { text: 'uda', t0: 195, t1: 220 },
+    { text: ' can', t0: 230, t1: 245 },
+    { text: "'t", t0: 245, t1: 255 },
+    { text: ' H', t0: 260, t1: 270 },
+    { text: 'LA', t0: 270, t1: 285 },
+    { text: ' [MUSIC]', t0: 290, t1: 400 },
+  ]);
+
+  assert.deepEqual(words.map((word) => word.text), ['melanoma,', 'Keytruda', "can't", 'HLA']);
+  assert.deepEqual(
+    words.map(({ startMs, endMs }) => [startMs, endMs]),
+    [[1_000, 1_500], [1_600, 2_200], [2_300, 2_550], [2_600, 2_850]],
+  );
+});
+
+test('caption quality is chosen explicitly and the requested model owns generation', () => {
+  const editor = readFileSync(new URL('../src/app/editor.tsx', import.meta.url), 'utf8');
+  const pipeline = readFileSync(new URL('../src/services/project-transcription.ts', import.meta.url), 'utf8');
+  assert.match(editor, /TRANSCRIPTION_MODELS\.map/);
+  assert.match(editor, /model\.id === 'balanced'[\s\S]*recommended/);
+  assert.match(pipeline, /modelId: TranscriptionModel\['id'\]/);
+  assert.doesNotMatch(pipeline, /modelId: 'fast'/);
+  assert.doesNotMatch(pipeline, /sourceResults\[sourceId\]\?\.modelId/);
+});
+
+test('Expo owns video-player release and editor teardown never commands a released player', () => {
+  const controller = readFileSync(new URL('../src/hooks/use-timeline-video-controller.ts', import.meta.url), 'utf8');
+  const teardownStart = controller.indexOf('return () => {');
+  const teardown = controller.slice(teardownStart, controller.indexOf('}, [player]);', teardownStart));
+  assert.match(teardown, /mountedRef\.current = false/);
+  assert.match(teardown, /desiredRef\.current = undefined/);
+  assert.doesNotMatch(teardown, /player\.(?:pause|play|replace|release)/);
 });
 
 test('production builds cannot use the debug signing config', () => {

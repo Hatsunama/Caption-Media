@@ -6,6 +6,7 @@ import { groupWordsIntoCaptions } from '@/lib/caption-grouping';
 import { getModel, type TranscriptionModel } from '@/lib/model-catalog';
 import { alignWordsToSpeech } from '@/lib/speech-alignment';
 import { PREPARING_AUDIO_CUES } from '@/lib/transcription-progress';
+import { coalesceWhisperWords } from '@/lib/whisper-words';
 import { requireFreeSpace } from '@/services/storage-policy';
 import type { CaptionBlock, WordToken } from '@/types/project';
 
@@ -247,7 +248,7 @@ export async function transcribeVideoLocally(options: {
     const result = await promise;
     if (result.isAborted) throw new Error('Transcription was cancelled');
 
-    const words = alignWordsToSpeech(normalizeWordSegments(result.segments), speechSegments);
+    const words = alignWordsToSpeech(coalesceWhisperWords(result.segments), speechSegments);
     if (words.length === 0) {
       throw new Error('Speech was detected, but no reliable words were found. Try the Balanced model or clearer audio.');
     }
@@ -274,26 +275,4 @@ export async function transcribeVideoLocally(options: {
   } finally {
     if (audioFile.exists) audioFile.delete();
   }
-}
-
-function normalizeWordSegments(
-  segments: { text: string; t0: number; t1: number }[],
-): WordToken[] {
-  const words: WordToken[] = [];
-
-  for (const segment of segments) {
-    const text = segment.text.trim();
-    if (!text || /^\[[^\]]+\]$/.test(text)) continue;
-
-    const startMs = Math.max(0, segment.t0 * 10);
-    const endMs = Math.max(startMs + 10, segment.t1 * 10);
-    words.push({
-      id: `word-${words.length + 1}`,
-      text,
-      startMs,
-      endMs,
-    });
-  }
-
-  return words;
 }

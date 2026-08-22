@@ -289,8 +289,11 @@ export function useTimelineVideoController(
     void drainTargetsRef.current();
     return () => {
       mountedRef.current = false;
+      playIntentRef.current = false;
+      desiredRef.current = undefined;
+      generationRef.current += 1;
+      boundaryClipIdRef.current = undefined;
       cancelGapClock();
-      player.pause();
     };
   }, [player]);
 

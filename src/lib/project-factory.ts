@@ -19,7 +19,7 @@ export function createCaptionProject(options: {
     sources: options.sources,
     transcription: {
       language: 'en',
-      modelId: 'fast',
+      modelId: 'balanced',
       words: [],
       sourceResults: {},
     },

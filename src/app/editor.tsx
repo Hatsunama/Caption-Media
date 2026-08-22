@@ -27,6 +27,7 @@ import { VideoTransformOverlay } from '@/components/editor/video-transform-overl
 import { useTimelineVideoController } from '@/hooks/use-timeline-video-controller';
 import { findAnimationPreset } from '@/lib/animation-presets';
 import { fontChoicePatch, type FontChoice } from '@/lib/font-catalog';
+import { TRANSCRIPTION_MODELS, type TranscriptionModel } from '@/lib/model-catalog';
 import {
   addImageLayer as addImageLayerToProject,
   createTextLayer,
@@ -287,10 +288,10 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
     persistProject(next);
   };
 
-  const generateCaptions = async () => {
+  const generateCaptions = async (modelId: TranscriptionModel['id']) => {
     setError(undefined);
     try {
-      const next = await generateAndSaveProjectCaptions(projectRef.current, setProgress);
+      const next = await generateAndSaveProjectCaptions(projectRef.current, modelId, setProgress);
       pushUndo();
       projectRef.current = next;
       setProject(next);
@@ -302,19 +303,18 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
     }
   };
 
-  const confirmRegenerateCaptions = () => {
+  const chooseCaptionQuality = (replacingExisting: boolean) => {
+    const modelDescription = TRANSCRIPTION_MODELS
+      .map((model) => `${model.label}: ${model.description}`)
+      .join('\n\n');
     Alert.alert(
-      'Generate captions again?',
-      'This replaces the current caption text and timing. Your caption style and extra text or image layers stay unchanged.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Generate again',
-          onPress: () => {
-            void generateCaptions();
-          },
-        },
-      ],
+      replacingExisting ? 'Replace captions with which quality?' : 'Choose caption quality',
+      `${replacingExisting ? 'This replaces the current caption text and timing. Styles and extra layers stay unchanged.\n\n' : ''}${modelDescription}`,
+      TRANSCRIPTION_MODELS.map((model) => ({
+        text: model.id === 'balanced' ? `${model.label} (recommended)` : model.label,
+        onPress: () => { void generateCaptions(model.id); },
+      })),
+      { cancelable: true },
     );
   };
 
@@ -799,7 +799,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
           </View>
           {project.captions.length === 0 ? (
             <Pressable
-              onPress={generateCaptions}
+              onPress={() => chooseCaptionQuality(false)}
               style={{ paddingHorizontal: 16, paddingVertical: 11, borderRadius: 999, backgroundColor: palette.accent }}>
               <Text style={{ color: '#10130A', fontWeight: '800' }}>Generate captions</Text>
             </Pressable>
@@ -811,7 +811,7 @@ function EditorWorkspace({ initialProject }: { initialProject: CaptionProject })
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Generate captions again"
-                onPress={confirmRegenerateCaptions}
+                onPress={() => chooseCaptionQuality(true)}
                 hitSlop={10}>
                 <Text style={{ color: palette.text, fontSize: 12, fontWeight: '700', textDecorationLine: 'underline' }}>
                   Generate again
